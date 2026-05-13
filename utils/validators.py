@@ -1,188 +1,139 @@
 """
-Validators module - Data validation utilities.
+validators.py — Lead data validation and deduplication.
 """
 
+from __future__ import annotations
+
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 class DataValidator:
     """Validate extracted lead data."""
-    
+
+    # Spam domains / keywords to reject
+    _SPAM_WORDS = frozenset([
+        "viagra", "casino", "lottery", "adult", "xxx", "spam",
+        "phishing", "scam", "free-money", "clickbait",
+    ])
+    _SPAM_EMAIL_PREFIXES = frozenset([
+        "noreply", "no-reply", "donotreply", "do-not-reply",
+        "mailer-daemon", "postmaster", "bounce",
+    ])
+    _INVALID_COMPANY_WORDS = frozenset([
+        "click here", "contact us", "email us", "phone", "address",
+        "website", "http", "www",
+    ])
+
     @staticmethod
     def is_valid_email(email: str) -> bool:
-        """Check if email format is valid."""
-        if not email:
+        if not email or "@" not in email:
             return False
-        
-        # Simple email validation
-        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        return bool(re.match(pattern, email))
-    
+        pattern = r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$"
+        if not re.match(pattern, email.strip()):
+            return False
+        local = email.split("@")[0].lower()
+        if local in DataValidator._SPAM_EMAIL_PREFIXES:
+            return False
+        return True
+
     @staticmethod
     def is_valid_phone(phone: str) -> bool:
-        """Check if phone number format is valid."""
         if not phone:
             return False
-        
-        # Remove non-digits
-        digits = re.sub(r'\D', '', phone)
-        
-        # Valid if has 10+ digits
-        return len(digits) >= 10
-    
+        digits = re.sub(r"\D", "", phone)
+        if len(digits) < 7:
+            return False
+        # Try phonenumbers library for richer validation
+        try:
+            import phonenumbers
+            parsed = phonenumbers.parse(phone if phone.startswith("+") else f"+{digits}")
+            return phonenumbers.is_valid_number(parsed)
+        except Exception:
+            # Fallback: accept if 7–15 digits
+            return 7 <= len(digits) <= 15
+
     @staticmethod
     def is_valid_company_name(company: str) -> bool:
-        """Check if company name is valid."""
-        if not company or len(company) < 2:
+        if not company or len(company.strip()) < 3:
             return False
-        
-        # Check for common invalid patterns
-        invalid_patterns = ['click here', 'contact', 'email', 'phone', 'address']
-        company_lower = company.lower()
-        
-        if any(pattern in company_lower for pattern in invalid_patterns):
+        cl = company.lower()
+        if any(w in cl for w in DataValidator._INVALID_COMPANY_WORDS):
             return False
-        
         return True
-    
+
     @staticmethod
-    def is_spam_lead(email: str = None, company: str = None) -> bool:
-        """Detect potential spam leads."""
-        spam_keywords = [
-            'viagra', 'casino', 'lottery', 'bitcoin', 'crypto', 'forex',
-            'dating', 'adult', 'xxx', 'spam'
-        ]
-        
-        text = (email or '') + ' ' + (company or '')
-        text_lower = text.lower()
-        
-        for keyword in spam_keywords:
-            if keyword in text_lower:
-                return True
-        
-        return False
-    
+    def is_spam_lead(email: str = "", company: str = "") -> bool:
+        text = f"{email} {company}".lower()
+        return any(w in text for w in DataValidator._SPAM_WORDS)
+
     @staticmethod
     def validate_lead_object(lead: Dict) -> Dict[str, bool]:
-        """
-        Validate all fields in a lead object.
-        
-        Returns:
-            Dictionary with validation results for each field
-        """
         return {
-            'email_valid': DataValidator.is_valid_email(lead.get('email', '')),
-            'phone_valid': DataValidator.is_valid_phone(lead.get('phone', '')),
-            'company_valid': DataValidator.is_valid_company_name(lead.get('company_name', '')),
-            'is_spam': DataValidator.is_spam_lead(
-                lead.get('email', ''),
-                lead.get('company_name', '')
-            ),
+            "email_valid": DataValidator.is_valid_email(lead.get("email", "")),
+            "phone_valid": DataValidator.is_valid_phone(lead.get("phone", "")),
+            "company_valid": DataValidator.is_valid_company_name(lead.get("company_name", "")),
+            "is_spam": DataValidator.is_spam_lead(lead.get("email", ""), lead.get("company_name", "")),
         }
-    
+
     @staticmethod
     def filter_leads(leads: List[Dict], require_email: bool = False) -> List[Dict]:
-        """
-        Filter out invalid leads.
-        
-        Args:
-            leads: List of lead dictionaries
-            require_email: If True, only keep leads with valid emails
-            
-        Returns:
-            Filtered list of valid leads
-        """
-        valid_leads = []
-        
+        """Remove spam and leads with no usable contact information."""
+        valid = []
         for lead in leads:
-            # Skip spam
-            if DataValidator.is_spam_lead(lead.get('email'), lead.get('company_name')):
+            if DataValidator.is_spam_lead(lead.get("email", ""), lead.get("company_name", "")):
                 continue
-            
-            # Check minimum requirements
-            has_email = DataValidator.is_valid_email(lead.get('email', ''))
-            has_phone = DataValidator.is_valid_phone(lead.get('phone', ''))
-            has_company = DataValidator.is_valid_company_name(lead.get('company_name', ''))
-            has_handle = bool(lead.get('social_handle', '').strip())
-            
+            has_email   = DataValidator.is_valid_email(lead.get("email", ""))
+            has_phone   = DataValidator.is_valid_phone(lead.get("phone", ""))
+            has_company = DataValidator.is_valid_company_name(lead.get("company_name", ""))
+            has_handle  = bool(lead.get("social_handle", "").strip())
             if require_email:
                 if has_email:
-                    valid_leads.append(lead)
+                    valid.append(lead)
             else:
                 if has_email or has_phone or has_company or has_handle:
-                    valid_leads.append(lead)
-        
-        return valid_leads
+                    valid.append(lead)
+        return valid
 
 
 class DeduplicateManager:
-    """Manage lead deduplication."""
-    
+    """Session-level lead deduplication."""
+
     def __init__(self):
-        """Initialize deduplication manager."""
-        self.seen = set()
-        self.seen_emails = set()
-        self.seen_phones = set()
-        self.seen_companies = set()
-    
-    def add_fingerprint(self, email: str = '', phone: str = '', company: str = '') -> str:
-        """
-        Create a fingerprint for a lead.
-        
-        Args:
-            email: Email address
-            phone: Phone number
-            company: Company name
-            
-        Returns:
-            Fingerprint string
-        """
-        # Use email as primary key, then phone, then company
-        key = email.lower().strip() if email else ''
-        key = key or (phone if phone else '')
-        key = key or (company.lower().strip() if company else '')
-        
-        return key
-    
-    def is_duplicate(self, email: str = '', phone: str = '', company: str = '') -> bool:
-        """
-        Check if a lead is a duplicate.
-        
-        Returns:
-            True if duplicate, False otherwise
-        """
-        email_key = email.lower().strip() if email else ''
-        phone_key = re.sub(r'\D', '', phone) if phone else ''
-        company_key = company.lower().strip() if company else ''
-        fingerprint = self.add_fingerprint(email_key, phone_key, company_key)
-        
-        if not fingerprint:
-            return False
-        
+        self.seen_emails:    set[str] = set()
+        self.seen_phones:    set[str] = set()
+        self.seen_companies: set[str] = set()
+        self.seen_handles:   set[str] = set()
+        self._count = 0
+
+    def is_duplicate(self, email: str = "", phone: str = "",
+                     company: str = "", handle: str = "") -> bool:
+        email_k   = email.lower().strip()   if email   else ""
+        phone_k   = re.sub(r"\D", "", phone) if phone   else ""
+        company_k = company.lower().strip()  if company else ""
+        handle_k  = handle.lower().strip()   if handle  else ""
+
         if (
-            (email_key and email_key in self.seen_emails) or
-            (phone_key and phone_key in self.seen_phones) or
-            (company_key and company_key in self.seen_companies)
+            (email_k   and email_k   in self.seen_emails)   or
+            (phone_k   and phone_k   in self.seen_phones)   or
+            (company_k and company_k in self.seen_companies) or
+            (handle_k  and handle_k  in self.seen_handles)
         ):
             return True
-        
-        self.seen.add(fingerprint)
-        if email_key:
-            self.seen_emails.add(email_key)
-        if phone_key:
-            self.seen_phones.add(phone_key)
-        if company_key:
-            self.seen_companies.add(company_key)
+
+        if email_k:   self.seen_emails.add(email_k)
+        if phone_k:   self.seen_phones.add(phone_k)
+        if company_k: self.seen_companies.add(company_k)
+        if handle_k:  self.seen_handles.add(handle_k)
+        self._count += 1
         return False
-    
+
     def clear(self) -> None:
-        """Clear the deduplication cache."""
-        self.seen.clear()
         self.seen_emails.clear()
         self.seen_phones.clear()
         self.seen_companies.clear()
-    
+        self.seen_handles.clear()
+        self._count = 0
+
     def get_count(self) -> int:
-        """Get count of unique leads seen."""
-        return len(self.seen)
+        return self._count

@@ -1,373 +1,333 @@
 """
-Main entry point - Lead scraping orchestrator.
+main.py — Lead scraping orchestrator.
+
+Run once:      python main.py
+Scheduled:     set scheduler.enabled = true in config.yaml
+Telegram bot:  python bot.py
 """
 
+from __future__ import annotations
+
+import csv
 import logging
 import sys
-import csv
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Optional
+
 import yaml
-from typing import List, Dict, Optional
 
 from scrapers.web_scraper import WebScraper
-from scrapers.social_scrapers import LinkedInScraper, FacebookScraper, TwitterScraper, InstagramScraper
-from utils.validators import DeduplicateManager, DataValidator
+from scrapers.social_scrapers import (
+    LinkedInScraper,
+    FacebookScraper,
+    TwitterScraper,
+    InstagramScraper,
+    TikTokScraper,
+    YouTubeScraper,
+)
+from utils.validators import DataValidator, DeduplicateManager
 from scheduler import ScrapingScheduler
 
-# Configure logging
+# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.FileHandler('scraper.log'),
-        logging.StreamHandler()
-    ]
+        logging.FileHandler("scraper.log"),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger(__name__)
 
 
-class LeadScrappingEngine:
-    """Main lead scraping orchestrator."""
-    
-    def __init__(self, config_file: str = 'config.yaml'):
-        """
-        Initialize the scraping engine.
-        
-        Args:
-            config_file: Path to configuration file
-        """
-        self.config = self._load_config(config_file)
-        self.dedup_manager = DeduplicateManager()
-        self.scheduler = ScrapingScheduler()
-        self.all_leads = []
-    
-    def _load_config(self, config_file: str) -> dict:
-        """Load configuration from YAML file."""
-        try:
-            with open(config_file, 'r') as f:
-                config = yaml.safe_load(f)
-            logger.info(f"Configuration loaded from {config_file}")
-            return config
-        except FileNotFoundError:
-            logger.error(f"Config file not found: {config_file}")
-            sys.exit(1)
-        except Exception as e:
-            logger.error(f"Error loading config: {e}")
-            sys.exit(1)
-    
-    def _get_keywords_for_niche(self, niche_name: str) -> List[str]:
-        """Get keywords for a specific niche."""
-        for niche in self.config.get('niches', []):
-            if niche.get('name') == niche_name:
-                return niche.get('keywords', [])
-        return []
-    
-    def _get_region_filter(self, regions: Optional[List[str]] = None) -> List[str]:
-        """Get configured region filter values."""
-        region_filter = regions if regions is not None else self.config.get('region_filter', [])
-        if isinstance(region_filter, str):
-            region_filter = [region_filter]
-        return [region.strip() for region in region_filter if region]
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def _get_default_platforms(self) -> List[str]:
+class LeadScrappingEngine:
+    """Main orchestrator — initialise once, call run_scraping() as needed."""
+
+    CSV_FIELDS = [
+        "email", "phone", "company_name", "social_handle",
+        "region", "source_url", "source_platform", "post_link", "extracted_at",
+    ]
+
+    def __init__(self, config_file: str = "config.yaml"):
+        self.config = self._load_config(config_file)
+        self.dedup = DeduplicateManager()
+        self.scheduler = ScrapingScheduler()
+        self.all_leads: List[Dict] = []
+
+    # ── config ────────────────────────────────────────────────────────────────
+
+    def _load_config(self, path: str) -> dict:
+        try:
+            with open(path) as f:
+                cfg = yaml.safe_load(f)
+            logger.info(f"Config loaded from {path}")
+            return cfg
+        except FileNotFoundError:
+            logger.error(f"Config not found: {path}")
+            sys.exit(1)
+        except Exception as exc:
+            logger.error(f"Config load error: {exc}")
+            sys.exit(1)
+
+    def _keywords_for_niche(self, niche_name: Optional[str]) -> List[str]:
+        if not niche_name:
+            return []
+        for n in self.config.get("niches", []):
+            if n.get("name") == niche_name:
+                return n.get("keywords", [])
+        return []
+
+    def _region_terms(self, regions: Optional[List[str]]) -> List[str]:
+        if regions is not None:
+            return [r.strip() for r in regions if r and r.strip()]
+        return [r.strip() for r in self.config.get("region_filter", []) if r]
+
+    def _default_platforms(self) -> List[str]:
         return [
-            platform.strip().lower()
-            for platform in self.config.get('bot', {}).get('default_platforms', ['web', 'linkedin', 'facebook', 'twitter', 'instagram'])
+            p.strip().lower()
+            for p in self.config.get("bot", {}).get(
+                "default_platforms",
+                ["web", "instagram", "tiktok", "twitter", "linkedin", "facebook", "youtube"],
+            )
         ]
 
-    def scrape_web(self, niche: str = None, regions: List[str] = None, max_urls: int = 10) -> List[Dict]:
-        """
-        Scrape general websites for leads.
-        
-        Args:
-            niche: Specific niche to target
-            regions: Optional list of regions to filter query terms
-            max_urls: Maximum result URLs to scrape
-            
-        Returns:
-            List of extracted leads
-        """
-        logger.info("Starting web scraping...")
-        
+    # ── per-platform scrapers ─────────────────────────────────────────────────
+
+    def scrape_web(self, niche: str = None, regions: List[str] = None,
+                   max_urls: int = 10) -> List[Dict]:
+        logger.info("── Web scraping ──")
         scraper = WebScraper(rate_limit=1.0)
-        web_leads = []
         try:
-            keywords = self._get_keywords_for_niche(niche) if niche else []
-            region_terms = self._get_region_filter(regions)
-            web_leads = scraper.scrape_search_queries(keywords, region_terms, max_results=max_urls)
-            logger.info(f"Found {len(web_leads)} leads from web search")
-            return web_leads
+            keywords = self._keywords_for_niche(niche)
+            return scraper.scrape_search_queries(
+                keywords, self._region_terms(regions), max_results=max_urls
+            )
         finally:
             scraper.close()
 
-    def scrape_instagram(self, niche: str = None, regions: List[str] = None, max_posts: int = 30) -> List[Dict]:
-        """
-        Scrape Instagram for leads.
-        """
-        logger.info("Starting Instagram scraping...")
-        scraper = InstagramScraper()
-        instagram_leads = []
+    def scrape_instagram(self, niche: str = None, regions: List[str] = None,
+                          max_posts: int = 30) -> List[Dict]:
+        logger.info("── Instagram scraping ──")
+        platform_cfg = next(
+            (p for p in self.config.get("platforms", []) if p.get("name") == "instagram"), {}
+        )
+        hashtags = list(platform_cfg.get("hashtags", []))
+        if niche:
+            hashtags.extend(self._keywords_for_niche(niche))
+        hashtags = list(dict.fromkeys(t.strip().lstrip("#") for t in hashtags if t))
+        scraper = InstagramScraper(config=self.config)
+        return scraper.search_hashtags(hashtags, regions=self._region_terms(regions),
+                                       max_posts=max_posts)
 
-        try:
-            platform_config = next(
-                (platform for platform in self.config.get('platforms', []) if platform.get('name') == 'instagram'),
-                {}
-            )
-            hashtags = platform_config.get('hashtags', []) or []
-            if niche:
-                hashtags.extend(self._get_keywords_for_niche(niche))
-            hashtags = list(dict.fromkeys([tag.strip().lstrip('#') for tag in hashtags if tag]))
-            region_terms = self._get_region_filter(regions)
-            instagram_leads = scraper.search_hashtags(hashtags, regions=region_terms, max_posts=max_posts)
-            logger.info(f"Found {len(instagram_leads)} leads from Instagram")
-            return instagram_leads
-        except Exception as e:
-            logger.error(f"Error scraping Instagram: {e}")
-            return []
-    
-    def scrape_linkedin(self) -> List[Dict]:
-        """Scrape LinkedIn for leads."""
-        logger.info("Starting LinkedIn scraping...")
-        
-        scraper = LinkedInScraper()
-        linkedin_leads = []
-        
-        try:
-            for niche in self.config.get('niches', []):
-                keywords = niche.get('keywords', [])
-                days = self.config.get('time_filters', {}).get('max_age_days', 7)
-                
-                posts = scraper.search_posts(keywords, days)
-                
-                for post in posts:
-                    # Extract leads from post
-                    leads = scraper.extract_from_post(
-                        post.get('text', ''),
-                        post.get('url', '')
-                    )
-                    linkedin_leads.extend(leads)
-            
-            logger.info(f"Found {len(linkedin_leads)} leads from LinkedIn")
-            return linkedin_leads
-            
-        except Exception as e:
-            logger.error(f"Error scraping LinkedIn: {e}")
-            return []
-    
+    def scrape_tiktok(self, niche: str = None, regions: List[str] = None,
+                      max_videos: int = 30) -> List[Dict]:
+        logger.info("── TikTok scraping ──")
+        platform_cfg = next(
+            (p for p in self.config.get("platforms", []) if p.get("name") == "tiktok"), {}
+        )
+        hashtags = list(platform_cfg.get("hashtags", []))
+        keywords = self._keywords_for_niche(niche)
+        scraper = TikTokScraper(config=self.config)
+        return scraper.search_hashtags(hashtags, keywords=keywords,
+                                       regions=self._region_terms(regions),
+                                       max_videos=max_videos)
+
+    def scrape_youtube(self, niche: str = None, regions: List[str] = None,
+                       max_results: int = 20) -> List[Dict]:
+        logger.info("── YouTube scraping ──")
+        platform_cfg = next(
+            (p for p in self.config.get("platforms", []) if p.get("name") == "youtube"), {}
+        )
+        keywords = platform_cfg.get("search_keywords", [])
+        if niche:
+            keywords = self._keywords_for_niche(niche) + keywords
+        scraper = YouTubeScraper(config=self.config)
+        return scraper.search(keywords, regions=self._region_terms(regions),
+                               max_results=max_results)
+
+    def scrape_linkedin(self, niche: str = None) -> List[Dict]:
+        logger.info("── LinkedIn scraping ──")
+        scraper = LinkedInScraper(config=self.config)
+        platform_cfg = next(
+            (p for p in self.config.get("platforms", []) if p.get("name") == "linkedin"), {}
+        )
+        days = self.config.get("time_filters", {}).get("max_age_days", 7)
+        leads: List[Dict] = []
+        all_keywords = (
+            self._keywords_for_niche(niche)
+            + platform_cfg.get("search_keywords", [])
+        )
+        posts = scraper.search_posts(all_keywords or ["web developer"], days=days)
+        for post in posts:
+            leads.extend(scraper.extract_from_post(post.get("text", ""), post.get("url", "")))
+        # search_posts already returns lead dicts when using RapidAPI path
+        leads.extend(posts)
+        return leads
+
     def scrape_facebook(self) -> List[Dict]:
-        """Scrape Facebook for leads."""
-        logger.info("Starting Facebook scraping...")
-        
-        scraper = FacebookScraper()
-        facebook_leads = []
-        
-        try:
-            for niche in self.config.get('niches', []):
-                keywords = niche.get('keywords', [])
-                days = self.config.get('time_filters', {}).get('max_age_days', 7)
-                
-                # Search Facebook groups
-                group_posts = scraper.search_groups(keywords, days)
-                for post in group_posts:
-                    leads = scraper.extract_from_post(
-                        post.get('text', ''),
-                        post.get('url', '')
-                    )
-                    facebook_leads.extend(leads)
-                
-                # Search Facebook pages
-                page_posts = scraper.search_pages(keywords, days)
-                for post in page_posts:
-                    leads = scraper.extract_from_post(
-                        post.get('text', ''),
-                        post.get('url', '')
-                    )
-                    facebook_leads.extend(leads)
-            
-            logger.info(f"Found {len(facebook_leads)} leads from Facebook")
-            return facebook_leads
-            
-        except Exception as e:
-            logger.error(f"Error scraping Facebook: {e}")
-            return []
-    
-    def scrape_twitter(self) -> List[Dict]:
-        """Scrape Twitter for leads."""
-        logger.info("Starting Twitter scraping...")
-        
-        scraper = TwitterScraper()
-        twitter_leads = []
-        
-        try:
-            for niche in self.config.get('niches', []):
-                keywords = niche.get('keywords', [])
-                days = self.config.get('time_filters', {}).get('max_age_days', 7)
-                
-                tweets = scraper.search_tweets(keywords, days=days)
-                
-                for tweet in tweets:
-                    leads = scraper.extract_from_tweet(
-                        tweet.get('text', ''),
-                        tweet.get('url', '')
-                    )
-                    twitter_leads.extend(leads)
-            
-            logger.info(f"Found {len(twitter_leads)} leads from Twitter")
-            return twitter_leads
-            
-        except Exception as e:
-            logger.error(f"Error scraping Twitter: {e}")
-            return []
-    
+        logger.info("── Facebook scraping ──")
+        scraper = FacebookScraper(config=self.config)
+        days = self.config.get("time_filters", {}).get("max_age_days", 7)
+        leads: List[Dict] = []
+        for niche in self.config.get("niches", []):
+            keywords = niche.get("keywords", [])
+            for post in scraper.search_groups(keywords, days):
+                leads.extend(scraper.extract_from_post(post.get("text", ""), post.get("url", "")))
+            for post in scraper.search_pages(keywords, days):
+                leads.extend(scraper.extract_from_post(post.get("text", ""), post.get("url", "")))
+        return leads
+
+    def scrape_twitter(self, niche: str = None) -> List[Dict]:
+        logger.info("── Twitter scraping ──")
+        scraper = TwitterScraper(config=self.config)
+        days = self.config.get("time_filters", {}).get("max_age_days", 7)
+        platform_cfg = next(
+            (p for p in self.config.get("platforms", []) if p.get("name") == "twitter"), {}
+        )
+        keywords = (
+            self._keywords_for_niche(niche)
+            + platform_cfg.get("search_keywords", [])
+        )
+        # TwitterScraper.search_tweets now returns lead dicts directly via RapidAPI
+        return scraper.search_tweets(keywords or [], days=days)
+
+    # ── main run ──────────────────────────────────────────────────────────────
+
     def run_scraping(
         self,
         platforms: List[str] = None,
         niche: str = None,
         regions: List[str] = None,
-        max_leads: int = None
+        max_leads: int = None,
     ) -> List[Dict]:
         """
-        Run scraping on specified platforms.
-        
+        Run all enabled platform scrapers and return deduplicated leads.
+
         Args:
-            platforms: List of platforms to scrape
-            niche: Niche name to target
-            regions: Optional list of regions to filter searches
-            max_leads: Optional maximum number of leads to return
-            
+            platforms:  platforms to scrape; defaults to config bot.default_platforms
+            niche:      niche name matching config.niches[].name
+            regions:    list of region strings to filter searches
+            max_leads:  cap on returned leads
+
         Returns:
-            List of all extracted leads
+            List of lead dicts
         """
-        platforms = platforms or self._get_default_platforms()
-        platforms = [platform.strip().lower() for platform in platforms if platform]
-        all_leads = []
-        region_terms = self._get_region_filter(regions)
-        limit = max_leads or self.config.get('bot', {}).get('default_amount')
+        platforms = [p.strip().lower() for p in (platforms or self._default_platforms()) if p]
+        limit = max_leads or self.config.get("bot", {}).get("default_amount", 50)
+        output_cfg = self.config.get("output", {})
+        search_limit = output_cfg.get("search_limit", 15)
+        region_terms = self._region_terms(regions)
 
-        logger.info(f"Starting scraping on platforms: {platforms}")
+        logger.info(f"Starting scrape | platforms={platforms} | niche={niche} | regions={region_terms}")
 
-        if 'web' in platforms:
-            web_limit = self.config.get('output', {}).get('search_limit', 15)
-            all_leads.extend(self.scrape_web(niche=niche, regions=region_terms, max_urls=web_limit))
+        raw: List[Dict] = []
 
-        if 'linkedin' in platforms:
-            all_leads.extend(self.scrape_linkedin())
+        dispatcher = {
+            "web":       lambda: self.scrape_web(niche=niche, regions=region_terms, max_urls=search_limit),
+            "instagram": lambda: self.scrape_instagram(niche=niche, regions=region_terms,
+                                                        max_posts=next((p.get("max_posts", 30)
+                                                            for p in self.config.get("platforms", [])
+                                                            if p.get("name") == "instagram"), 30)),
+            "tiktok":    lambda: self.scrape_tiktok(niche=niche, regions=region_terms,
+                                                     max_videos=next((p.get("max_videos", 30)
+                                                         for p in self.config.get("platforms", [])
+                                                         if p.get("name") == "tiktok"), 30)),
+            "youtube":   lambda: self.scrape_youtube(niche=niche, regions=region_terms,
+                                                      max_results=next((p.get("max_results", 20)
+                                                          for p in self.config.get("platforms", [])
+                                                          if p.get("name") == "youtube"), 20)),
+            "linkedin":  lambda: self.scrape_linkedin(niche=niche),
+            "facebook":  lambda: self.scrape_facebook(),
+            "twitter":   lambda: self.scrape_twitter(niche=niche),
+        }
 
-        if 'facebook' in platforms:
-            all_leads.extend(self.scrape_facebook())
+        for platform in platforms:
+            fn = dispatcher.get(platform)
+            if fn:
+                try:
+                    raw.extend(fn())
+                except Exception as exc:
+                    logger.error(f"Platform '{platform}' crashed: {exc}", exc_info=True)
+            else:
+                logger.warning(f"Unknown platform '{platform}' — skipped.")
 
-        if 'twitter' in platforms:
-            all_leads.extend(self.scrape_twitter())
+        # filter + deduplicate
+        filtered = DataValidator.filter_leads(raw, require_email=False)
+        unique: List[Dict] = []
+        self.dedup.clear()
+        for lead in filtered:
+            if not self.dedup.is_duplicate(
+                email=lead.get("email", ""),
+                phone=lead.get("phone", ""),
+                company=lead.get("company_name", ""),
+            ):
+                unique.append(lead)
 
-        if 'instagram' in platforms:
-            instagram_platform = next(
-                (platform for platform in self.config.get('platforms', []) if platform.get('name') == 'instagram'),
-                {}
-            )
-            instagram_limit = instagram_platform.get('max_posts', 30)
-            all_leads.extend(self.scrape_instagram(niche=niche, regions=region_terms, max_posts=instagram_limit))
+        if limit:
+            unique = unique[:limit]
 
-        filtered_leads = DataValidator.filter_leads(all_leads, require_email=False)
+        logger.info(f"Raw: {len(raw)} | After filter: {len(filtered)} | Unique: {len(unique)}")
+        self.all_leads = unique
+        return unique
 
-        if limit is not None:
-            filtered_leads = filtered_leads[:limit]
+    # ── output ────────────────────────────────────────────────────────────────
 
-        logger.info(f"Total leads collected: {len(all_leads)}")
-        logger.info(f"Leads after filtering: {len(filtered_leads)}")
-
-        self.all_leads = filtered_leads
-        return filtered_leads
-    
-    def save_leads(self, output_filename: str = None) -> str:
-        """
-        Save extracted leads to CSV.
-        
-        Args:
-            output_filename: Output filename (optional)
-            
-        Returns:
-            Path to saved file
-        """
+    def save_leads(self, output_filename: str = None) -> Optional[str]:
+        """Save current leads to CSV and return the file path."""
         if not self.all_leads:
-            logger.warning("No leads to save")
+            logger.warning("No leads to save.")
             return None
-        
-        # Generate filename if not provided
-        if output_filename is None:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_filename = f"leads_{timestamp}.csv"
-        
-        # Create data directory if it doesn't exist
-        data_dir = self.config.get('output', {}).get('output_dir', 'data')
-        Path(data_dir).mkdir(exist_ok=True)
-        
-        filepath = Path(data_dir) / output_filename
-        
-        fieldnames = [
-            'email',
-            'phone',
-            'company_name',
-            'social_handle',
-            'region',
-            'source_url',
-            'source_platform',
-            'post_link',
-            'extracted_at',
-        ]
 
-        with filepath.open('w', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
+        if not output_filename:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_filename = f"leads_{ts}.csv"
+
+        data_dir = self.config.get("output", {}).get("output_dir", "data")
+        Path(data_dir).mkdir(parents=True, exist_ok=True)
+        filepath = Path(data_dir) / output_filename
+
+        with filepath.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self.CSV_FIELDS, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(self.all_leads)
 
-        logger.info(f"Leads saved to: {filepath}")
-        
+        logger.info(f"Saved {len(self.all_leads)} leads → {filepath}")
         return str(filepath)
-    
+
+    # ── scheduler ─────────────────────────────────────────────────────────────
+
     def start_scheduler(self, frequency_hours: int = 24, start_time: str = "08:00") -> None:
-        """
-        Start the scheduler for periodic runs.
-        
-        Args:
-            frequency_hours: Hours between runs
-            start_time: Time to start in HH:MM format
-        """
-        hour, minute = map(int, start_time.split(':'))
-        
-        def scraping_job():
-            logger.info("Executing scheduled scraping job...")
+        hour, minute = map(int, start_time.split(":"))
+
+        def _job():
+            logger.info("Scheduled scraping job starting …")
             leads = self.run_scraping()
             self.save_leads()
-            logger.info(f"Scheduled job completed. Found {len(leads)} leads")
-        
-        self.scheduler.schedule_daily(scraping_job, hour=hour, minute=minute)
+            logger.info(f"Scheduled job done — {len(leads)} leads collected.")
+
+        self.scheduler.schedule_daily(_job, hour=hour, minute=minute)
         self.scheduler.start()
-    
+
     def stop_scheduler(self) -> None:
-        """Stop the scheduler."""
         self.scheduler.stop()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+
 def main():
-    """Main entry point."""
-    logger.info("Lead Scraping Engine starting...")
-    
-    # Initialize engine
-    engine = LeadScrappingEngine('config.yaml')
-    
-    # Run scraping on all platforms
+    logger.info("Lead Scraping Engine starting …")
+    engine = LeadScrappingEngine("config.yaml")
     leads = engine.run_scraping()
-    
-    # Save results
     if leads:
-        filepath = engine.save_leads()
-        logger.info(f"✓ Successfully saved {len(leads)} leads to {filepath}")
+        fp = engine.save_leads()
+        logger.info(f"✓ {len(leads)} leads saved to {fp}")
     else:
-        logger.warning("⚠ No leads extracted")
-    
-    logger.info("Lead Scraping Engine completed")
+        logger.warning("⚠  No leads extracted. Check your RAPIDAPI_KEY and platform config.")
+    logger.info("Done.")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

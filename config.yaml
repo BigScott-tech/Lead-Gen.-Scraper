@@ -1,6 +1,8 @@
-# Lead Scraping System Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Lead Generation Engine — Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# Niches to target
+# ── Niches ─────────────────────────────────────────────────────────────────────
 niches:
   - name: "Tech Startups"
     keywords:
@@ -9,12 +11,14 @@ niches:
       - "full stack developer"
       - "react developer"
       - "node.js developer"
-      - "python programmer"
+      - "python developer"
       - "hiring developer"
       - "contract developer"
       - "freelance developer"
       - "remote developer"
-  
+      - "need a website"
+      - "looking for developer"
+
   - name: "HVAC Services"
     keywords:
       - "AC repair"
@@ -27,7 +31,7 @@ niches:
       - "ductwork"
       - "AC installation"
       - "heating service"
-  
+
   - name: "Web Development"
     keywords:
       - "web development"
@@ -36,9 +40,80 @@ niches:
       - "seo services"
       - "digital marketing"
       - "website development"
+      - "need website"
+      - "build website"
+      - "website redesign"
 
-# Social Media Platforms
+  - name: "E-commerce"
+    keywords:
+      - "online store"
+      - "shopify store"
+      - "ecommerce website"
+      - "product listings"
+      - "dropshipping"
+      - "woocommerce"
+      - "need ecommerce site"
+
+  - name: "Social Media Marketing"
+    keywords:
+      - "social media manager"
+      - "content creator"
+      - "instagram growth"
+      - "tiktok marketing"
+      - "brand awareness"
+      - "social media agency"
+      - "smma"
+      - "digital marketing agency"
+
+# ── Platforms ──────────────────────────────────────────────────────────────────
 platforms:
+  - name: "web"
+    enabled: true
+    search_engine: "duckduckgo"
+
+  - name: "instagram"
+    enabled: true
+    hashtags:
+      - "hiring"
+      - "freelance"
+      - "startup"
+      - "webdevelopment"
+      - "digitalnomad"
+      - "entrepreneur"
+    max_posts: 30
+    filter_by_region: true
+
+  - name: "tiktok"
+    enabled: true
+    hashtags:
+      - "hiring"
+      - "startup"
+      - "smallbusiness"
+      - "entrepreneur"
+      - "freelance"
+      - "webdesign"
+      - "digitalmarketing"
+    max_videos: 30
+
+  - name: "youtube"
+    enabled: true
+    search_keywords:
+      - "hire web developer"
+      - "need website built"
+      - "looking for freelancer"
+      - "startup looking for"
+    max_results: 20
+
+  - name: "twitter"
+    enabled: true
+    search_keywords:
+      - "#hiring"
+      - "#nowhiring"
+      - "#freelance"
+      - "need a developer"
+      - "looking for dev"
+      - "building a startup"
+
   - name: "linkedin"
     enabled: true
     search_keywords:
@@ -46,51 +121,50 @@ platforms:
       - "looking for"
       - "need developer"
       - "we're recruiting"
-  
+      - "open to work"
+
   - name: "facebook"
     enabled: true
     search_groups: true
     community_search: true
-  
-  - name: "twitter"
-    enabled: true
-    search_keywords:
-      - "#hiring"
-      - "#nowhiring"
-      - "#jobs"
-      - "we're hiring"
-  
-  - name: "web"
-    enabled: true
-    search_engines:
-      - "google"
 
-  - name: "instagram"
-    enabled: true
-    hashtags:
-      - "hiring"
-      - "jobs"
-      - "startup"
-      - "freelance"
-      - "webdevelopment"
-    max_posts: 30
-    filter_by_region: true
+# ── RapidAPI ───────────────────────────────────────────────────────────────────
+# Get your free key at https://rapidapi.com
+# One key works for all platforms below.
+# Leave blank to use free fallback scrapers (less reliable).
+rapidapi:
+  key_env: "RAPIDAPI_KEY"           # env var name — do NOT put key here
+  timeout: 15
+  retry_attempts: 2
 
-# Optional region targeting / session filter
+  # Host names — these are the RapidAPI marketplace endpoints.
+  # They may change over time; verify at rapidapi.com if a platform stops working.
+  hosts:
+    instagram: "instagram-scraper-api2.p.rapidapi.com"
+    twitter:   "twitter241.p.rapidapi.com"
+    linkedin:  "linkedin-data-api.p.rapidapi.com"
+    tiktok:    "tiktok-api23.p.rapidapi.com"
+    youtube:   "youtube-v31.p.rapidapi.com"
+
+# ── Region targeting ───────────────────────────────────────────────────────────
 regions:
-  - "Africa"
   - "Nigeria"
+  - "Africa"
   - "U.S."
-  - "U.A.E."
+  - "United States"
   - "U.K."
+  - "United Kingdom"
+  - "U.A.E."
+  - "Canada"
+  - "Australia"
 region_filter: []
 
-# Time-based filtering (in days)
+# ── Time filters ───────────────────────────────────────────────────────────────
 time_filters:
-  max_age_days: 7  # Include posts from last 7 days
-  min_age_minutes: 0  # Minimum age (0 = all recent)
+  max_age_days: 7
+  min_age_minutes: 0
 
-# Extraction settings
+# ── Extraction ─────────────────────────────────────────────────────────────────
 extraction:
   extract_emails: true
   extract_phones: true
@@ -100,32 +174,21 @@ extraction:
   validate_emails: true
   validate_phones: true
 
-# Telegram bot defaults
-bot:
-  default_platforms:
-    - "web"
-    - "linkedin"
-    - "facebook"
-    - "twitter"
-    - "instagram"
-  default_amount: 50
-  default_region: ""
-
-# Deduplication
+# ── Deduplication ──────────────────────────────────────────────────────────────
 deduplication:
   enabled: true
   duplicate_check_fields:
     - "email"
     - "phone"
-    - "company_name"
+    - "social_handle"
 
-# Scheduling
+# ── Scheduling ─────────────────────────────────────────────────────────────────
 scheduler:
   enabled: false
-  frequency_hours: 24  # Run every 24 hours
-  start_time: "08:00"  # Start at 8 AM
+  frequency_hours: 24
+  start_time: "08:00"
 
-# Output
+# ── Output ─────────────────────────────────────────────────────────────────────
 output:
   format: "csv"
   output_dir: "data"
@@ -133,15 +196,27 @@ output:
   dedup_history: "data/leads_history.csv"
   search_limit: 15
 
-# Human-like behavior
+# ── Human-like behavior (web scraper) ──────────────────────────────────────────
 human_behavior:
   use_random_delays: true
   min_delay_seconds: 2
   max_delay_seconds: 8
-  use_proxies: true
   rotate_user_agents: true
-  
-# Logging
+
+# ── Telegram bot defaults ──────────────────────────────────────────────────────
+bot:
+  default_platforms:
+    - "web"
+    - "instagram"
+    - "tiktok"
+    - "twitter"
+    - "linkedin"
+    - "facebook"
+    - "youtube"
+  default_amount: 50
+  default_region: ""
+
+# ── Logging ────────────────────────────────────────────────────────────────────
 logging:
   level: "INFO"
   log_file: "scraper.log"
