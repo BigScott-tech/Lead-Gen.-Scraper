@@ -13,8 +13,11 @@ tqdm==4.66.2
 email-validator==2.1.0
 phonenumbers==8.13.31
 
-# ── Instagram fallback scraper (used when no RapidAPI key is set) ──────────────
+# ── Instagram public scraper ──────────────────────────────────────────────────
 instaloader==4.10.3
+
+# ── Optional logged-in browser mode ───────────────────────────────────────────
+playwright==1.44.0
 
 # ── Scheduling ─────────────────────────────────────────────────────────────────
 apscheduler==3.10.4

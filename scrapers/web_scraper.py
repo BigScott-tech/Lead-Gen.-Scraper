@@ -80,6 +80,14 @@ class WebScraper:
         """
         Perform a DuckDuckGo HTML search and return top result URLs.
         """
+        return [result["url"] for result in self.search_documents(query, max_results=max_results)]
+
+    def search_documents(self, query: str, max_results: int = 10) -> List[Dict]:
+        """
+        Perform a DuckDuckGo HTML search and return result metadata.
+
+        Returned fields: url, title, snippet, query.
+        """
         try:
             self.rate_limiter.wait_if_needed()
             headers = HumanBehavior.get_headers()
@@ -91,44 +99,60 @@ class WebScraper:
             )
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
-            links = []
+            results = []
 
-            for result_link in soup.select('a.result__a'):
+            for result in soup.select('.result'):
+                result_link = result.select_one('a.result__a')
+                if not result_link:
+                    continue
                 href = result_link.get('href')
                 if href and href.startswith('http'):
-                    links.append(href)
-                    if len(links) >= max_results:
+                    snippet_el = result.select_one('.result__snippet')
+                    results.append({
+                        'url': href,
+                        'title': result_link.get_text(' ', strip=True),
+                        'snippet': snippet_el.get_text(' ', strip=True) if snippet_el else '',
+                        'query': query,
+                    })
+                    if len(results) >= max_results:
                         break
 
-            if not links:
+            if not results:
                 for anchor in soup.find_all('a', href=True):
                     href = anchor['href']
                     if href.startswith('http'):
-                        links.append(href)
-                        if len(links) >= max_results:
+                        results.append({
+                            'url': href,
+                            'title': anchor.get_text(' ', strip=True),
+                            'snippet': '',
+                            'query': query,
+                        })
+                        if len(results) >= max_results:
                             break
 
-            return links
+            return results
         except Exception as e:
             logger.error(f"Error during search query '{query}': {e}")
             return []
 
-    def scrape_search_queries(self, keywords: List[str] = None, regions: List[str] = None, max_results: int = 10) -> List[Dict]:
+    def scrape_search_queries(self, keywords: List[str] = None, regions: List[str] = None,
+                              max_results: int = 10, queries: List[str] = None) -> List[Dict]:
         """
         Perform search queries for keywords and optional regions, then scrape resulting URLs.
         """
-        if not keywords and not regions:
+        if not queries and not keywords and not regions:
             return []
 
-        query_texts = []
-        if keywords and regions:
-            for region in regions:
-                for keyword in keywords:
-                    query_texts.append(f"{keyword} {region}")
-        elif keywords:
-            query_texts.append(' '.join(keywords))
-        else:
-            query_texts.append(' '.join(regions))
+        query_texts = list(queries or [])
+        if not query_texts:
+            if keywords and regions:
+                for region in regions:
+                    for keyword in keywords:
+                        query_texts.append(f"{keyword} {region}")
+            elif keywords:
+                query_texts.append(' '.join(keywords))
+            else:
+                query_texts.append(' '.join(regions))
 
         urls = []
         seen_urls = set()

@@ -48,7 +48,9 @@ class DataValidator:
         try:
             import phonenumbers
             parsed = phonenumbers.parse(phone if phone.startswith("+") else f"+{digits}")
-            return phonenumbers.is_valid_number(parsed)
+            if phonenumbers.is_valid_number(parsed):
+                return True
+            return 7 <= len(digits) <= 15
         except Exception:
             # Fallback: accept if 7–15 digits
             return 7 <= len(digits) <= 15

@@ -9,6 +9,8 @@ Telegram bot:  python bot.py
 from __future__ import annotations
 
 import csv
+import argparse
+import json
 import logging
 import sys
 from datetime import datetime
@@ -26,7 +28,11 @@ from scrapers.social_scrapers import (
     TikTokScraper,
     YouTubeScraper,
 )
+from scrapers.browser_tiktok import TikTokBrowserScraper, BrowserRunReport
 from utils.validators import DataValidator, DeduplicateManager
+from utils.search_planner import SearchPlanner
+from utils.lead_scoring import LeadScorer
+from utils.lead_store import LeadStore
 from scheduler import ScrapingScheduler
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -48,7 +54,9 @@ class LeadScrappingEngine:
 
     CSV_FIELDS = [
         "email", "phone", "company_name", "social_handle",
-        "region", "source_url", "source_platform", "post_link", "extracted_at",
+        "region", "source_url", "source_platform", "post_link", "profile_url",
+        "title", "snippet", "search_query", "lead_score", "lead_reason",
+        "extracted_at",
     ]
 
     def __init__(self, config_file: str = "config.yaml"):
@@ -56,6 +64,11 @@ class LeadScrappingEngine:
         self.dedup = DeduplicateManager()
         self.scheduler = ScrapingScheduler()
         self.all_leads: List[Dict] = []
+        self.search_planner = SearchPlanner(self.config)
+        self.scorer = LeadScorer(self.config)
+        store_path = self.config.get("deduplication", {}).get("sqlite_path", "data/leads.sqlite3")
+        self.lead_store = LeadStore(store_path)
+        self.last_browser_report: Optional[BrowserRunReport] = None
 
     # ── config ────────────────────────────────────────────────────────────────
 
@@ -97,19 +110,25 @@ class LeadScrappingEngine:
     # ── per-platform scrapers ─────────────────────────────────────────────────
 
     def scrape_web(self, niche: str = None, regions: List[str] = None,
-                   max_urls: int = 10) -> List[Dict]:
+                   max_urls: int = 10, search_text: str = "") -> List[Dict]:
         logger.info("── Web scraping ──")
         scraper = WebScraper(rate_limit=1.0)
         try:
             keywords = self._keywords_for_niche(niche)
+            plan = self.search_planner.plan(
+                query=search_text,
+                niche_keywords=keywords,
+                regions=self._region_terms(regions),
+            )
+            queries = self.search_planner.queries_for_platform("web", plan, max_queries=max_urls)
             return scraper.scrape_search_queries(
-                keywords, self._region_terms(regions), max_results=max_urls
+                plan.terms, plan.regions, max_results=max_urls, queries=queries
             )
         finally:
             scraper.close()
 
     def scrape_instagram(self, niche: str = None, regions: List[str] = None,
-                          max_posts: int = 30) -> List[Dict]:
+                          max_posts: int = 30, search_text: str = "") -> List[Dict]:
         logger.info("── Instagram scraping ──")
         platform_cfg = next(
             (p for p in self.config.get("platforms", []) if p.get("name") == "instagram"), {}
@@ -117,26 +136,31 @@ class LeadScrappingEngine:
         hashtags = list(platform_cfg.get("hashtags", []))
         if niche:
             hashtags.extend(self._keywords_for_niche(niche))
+        if search_text:
+            hashtags.insert(0, search_text)
         hashtags = list(dict.fromkeys(t.strip().lstrip("#") for t in hashtags if t))
         scraper = InstagramScraper(config=self.config)
         return scraper.search_hashtags(hashtags, regions=self._region_terms(regions),
-                                       max_posts=max_posts)
+                                       max_posts=max_posts, raw_query=search_text)
 
     def scrape_tiktok(self, niche: str = None, regions: List[str] = None,
-                      max_videos: int = 30) -> List[Dict]:
+                      max_videos: int = 30, search_text: str = "") -> List[Dict]:
         logger.info("── TikTok scraping ──")
         platform_cfg = next(
             (p for p in self.config.get("platforms", []) if p.get("name") == "tiktok"), {}
         )
         hashtags = list(platform_cfg.get("hashtags", []))
         keywords = self._keywords_for_niche(niche)
+        if search_text:
+            keywords = [search_text] + keywords
         scraper = TikTokScraper(config=self.config)
         return scraper.search_hashtags(hashtags, keywords=keywords,
                                        regions=self._region_terms(regions),
-                                       max_videos=max_videos)
+                                       max_videos=max_videos,
+                                       raw_query=search_text)
 
     def scrape_youtube(self, niche: str = None, regions: List[str] = None,
-                       max_results: int = 20) -> List[Dict]:
+                       max_results: int = 20, search_text: str = "") -> List[Dict]:
         logger.info("── YouTube scraping ──")
         platform_cfg = next(
             (p for p in self.config.get("platforms", []) if p.get("name") == "youtube"), {}
@@ -144,11 +168,15 @@ class LeadScrappingEngine:
         keywords = platform_cfg.get("search_keywords", [])
         if niche:
             keywords = self._keywords_for_niche(niche) + keywords
+        if search_text:
+            keywords = [search_text] + keywords
         scraper = YouTubeScraper(config=self.config)
         return scraper.search(keywords, regions=self._region_terms(regions),
-                               max_results=max_results)
+                               max_results=max_results,
+                               raw_query=search_text)
 
-    def scrape_linkedin(self, niche: str = None) -> List[Dict]:
+    def scrape_linkedin(self, niche: str = None, regions: List[str] = None,
+                        search_text: str = "") -> List[Dict]:
         logger.info("── LinkedIn scraping ──")
         scraper = LinkedInScraper(config=self.config)
         platform_cfg = next(
@@ -160,27 +188,42 @@ class LeadScrappingEngine:
             self._keywords_for_niche(niche)
             + platform_cfg.get("search_keywords", [])
         )
-        posts = scraper.search_posts(all_keywords or ["web developer"], days=days)
+        if search_text:
+            all_keywords = [search_text] + all_keywords
+        posts = scraper.search_public_posts(
+            all_keywords or ["web developer"],
+            days=days,
+            regions=self._region_terms(regions),
+            raw_query=search_text,
+        )
         for post in posts:
             leads.extend(scraper.extract_from_post(post.get("text", ""), post.get("url", "")))
-        # search_posts already returns lead dicts when using RapidAPI path
+        # search_public_posts already returns normalized lead dicts.
         leads.extend(posts)
         return leads
 
-    def scrape_facebook(self) -> List[Dict]:
+    def scrape_facebook(self, niche: str = None, regions: List[str] = None,
+                        search_text: str = "") -> List[Dict]:
         logger.info("── Facebook scraping ──")
         scraper = FacebookScraper(config=self.config)
         days = self.config.get("time_filters", {}).get("max_age_days", 7)
         leads: List[Dict] = []
-        for niche in self.config.get("niches", []):
-            keywords = niche.get("keywords", [])
-            for post in scraper.search_groups(keywords, days):
-                leads.extend(scraper.extract_from_post(post.get("text", ""), post.get("url", "")))
-            for post in scraper.search_pages(keywords, days):
-                leads.extend(scraper.extract_from_post(post.get("text", ""), post.get("url", "")))
+        keywords = self._keywords_for_niche(niche)
+        if search_text:
+            keywords = [search_text] + keywords
+        if not keywords:
+            for configured_niche in self.config.get("niches", []):
+                keywords.extend(configured_niche.get("keywords", []))
+        leads.extend(scraper.search_public_posts(
+            keywords,
+            days=days,
+            regions=self._region_terms(regions),
+            raw_query=search_text,
+        ))
         return leads
 
-    def scrape_twitter(self, niche: str = None) -> List[Dict]:
+    def scrape_twitter(self, niche: str = None, regions: List[str] = None,
+                       search_text: str = "") -> List[Dict]:
         logger.info("── Twitter scraping ──")
         scraper = TwitterScraper(config=self.config)
         days = self.config.get("time_filters", {}).get("max_age_days", 7)
@@ -191,8 +234,39 @@ class LeadScrappingEngine:
             self._keywords_for_niche(niche)
             + platform_cfg.get("search_keywords", [])
         )
-        # TwitterScraper.search_tweets now returns lead dicts directly via RapidAPI
-        return scraper.search_tweets(keywords or [], days=days)
+        if search_text:
+            keywords = [search_text] + keywords
+        return scraper.search_tweets(
+            keywords or [],
+            days=days,
+            raw_query=search_text,
+        )
+
+    def browser_login(self, platform: str = "tiktok", profile: str = "default",
+                      hold_seconds: int = 180) -> BrowserRunReport:
+        platform = self.search_planner.normalize_platform(platform)
+        if platform != "tiktok":
+            raise ValueError("Browser login is currently implemented for TikTok only.")
+        scraper = TikTokBrowserScraper(config=self.config, profile=profile, headless=False)
+        self.last_browser_report = scraper.open_login_window(hold_seconds=hold_seconds)
+        return self.last_browser_report
+
+    def scrape_tiktok_browser(self, search_text: str, max_leads: int = 30,
+                              profile: str = "default", headful: bool = False,
+                              persist: bool = True) -> List[Dict]:
+        scraper = TikTokBrowserScraper(
+            config=self.config,
+            profile=profile,
+            headless=not headful,
+        )
+        leads, report = scraper.search(search_text, limit=max_leads)
+        leads = DataValidator.filter_leads(leads, require_email=False)
+        leads = self.scorer.score_many(leads)
+        if persist and self.config.get("deduplication", {}).get("persistent", True):
+            leads = self.lead_store.filter_new(leads)
+        self.all_leads = leads
+        self.last_browser_report = report
+        return leads
 
     # ── main run ──────────────────────────────────────────────────────────────
 
@@ -202,6 +276,8 @@ class LeadScrappingEngine:
         niche: str = None,
         regions: List[str] = None,
         max_leads: int = None,
+        search_text: str = "",
+        persist: bool = True,
     ) -> List[Dict]:
         """
         Run all enabled platform scrapers and return deduplicated leads.
@@ -211,6 +287,8 @@ class LeadScrappingEngine:
             niche:      niche name matching config.niches[].name
             regions:    list of region strings to filter searches
             max_leads:  cap on returned leads
+            search_text: optional free-form query, e.g.
+                         "website developer needed since 10-05-2026"
 
         Returns:
             List of lead dicts
@@ -221,27 +299,38 @@ class LeadScrappingEngine:
         search_limit = output_cfg.get("search_limit", 15)
         region_terms = self._region_terms(regions)
 
-        logger.info(f"Starting scrape | platforms={platforms} | niche={niche} | regions={region_terms}")
+        logger.info(
+            "Starting scrape | platforms=%s | niche=%s | regions=%s | query=%s",
+            platforms, niche, region_terms, search_text,
+        )
 
         raw: List[Dict] = []
 
         dispatcher = {
-            "web":       lambda: self.scrape_web(niche=niche, regions=region_terms, max_urls=search_limit),
+            "web":       lambda: self.scrape_web(niche=niche, regions=region_terms,
+                                                  max_urls=search_limit,
+                                                  search_text=search_text),
             "instagram": lambda: self.scrape_instagram(niche=niche, regions=region_terms,
                                                         max_posts=next((p.get("max_posts", 30)
                                                             for p in self.config.get("platforms", [])
-                                                            if p.get("name") == "instagram"), 30)),
+                                                            if p.get("name") == "instagram"), 30),
+                                                        search_text=search_text),
             "tiktok":    lambda: self.scrape_tiktok(niche=niche, regions=region_terms,
                                                      max_videos=next((p.get("max_videos", 30)
                                                          for p in self.config.get("platforms", [])
-                                                         if p.get("name") == "tiktok"), 30)),
+                                                         if p.get("name") == "tiktok"), 30),
+                                                     search_text=search_text),
             "youtube":   lambda: self.scrape_youtube(niche=niche, regions=region_terms,
                                                       max_results=next((p.get("max_results", 20)
                                                           for p in self.config.get("platforms", [])
-                                                          if p.get("name") == "youtube"), 20)),
-            "linkedin":  lambda: self.scrape_linkedin(niche=niche),
-            "facebook":  lambda: self.scrape_facebook(),
-            "twitter":   lambda: self.scrape_twitter(niche=niche),
+                                                          if p.get("name") == "youtube"), 20),
+                                                      search_text=search_text),
+            "linkedin":  lambda: self.scrape_linkedin(niche=niche, regions=region_terms,
+                                                       search_text=search_text),
+            "facebook":  lambda: self.scrape_facebook(niche=niche, regions=region_terms,
+                                                       search_text=search_text),
+            "twitter":   lambda: self.scrape_twitter(niche=niche, regions=region_terms,
+                                                      search_text=search_text),
         }
 
         for platform in platforms:
@@ -263,15 +352,45 @@ class LeadScrappingEngine:
                 email=lead.get("email", ""),
                 phone=lead.get("phone", ""),
                 company=lead.get("company_name", ""),
+                handle=lead.get("social_handle", ""),
             ):
                 unique.append(lead)
 
+        unique = self.scorer.score_many(unique)
         if limit:
             unique = unique[:limit]
+        if persist and self.config.get("deduplication", {}).get("persistent", True):
+            unique = self.lead_store.filter_new(unique)
 
         logger.info(f"Raw: {len(raw)} | After filter: {len(filtered)} | Unique: {len(unique)}")
         self.all_leads = unique
         return unique
+
+    def deep_enrich_leads(self, leads: List[Dict] = None, max_pages: int = 20) -> List[Dict]:
+        """Visit reachable source/profile URLs and merge any extra contacts found."""
+        targets = leads or self.all_leads
+        if not targets:
+            return []
+
+        scraper = WebScraper(rate_limit=0.5)
+        enriched: List[Dict] = []
+        try:
+            for lead in targets[:max_pages]:
+                merged = dict(lead)
+                urls = [lead.get("profile_url"), lead.get("source_url")]
+                for url in [item for item in urls if item]:
+                    found = scraper.scrape_url(url)
+                    for extra in found:
+                        for field in ("email", "phone", "company_name"):
+                            if not merged.get(field) and extra.get(field):
+                                merged[field] = extra[field]
+                enriched.append(merged)
+        finally:
+            scraper.close()
+        self.all_leads = self.scorer.score_many(enriched)
+        if self.config.get("deduplication", {}).get("persistent", True):
+            self.lead_store.save_many(self.all_leads)
+        return self.all_leads
 
     # ── output ────────────────────────────────────────────────────────────────
 
@@ -297,6 +416,20 @@ class LeadScrappingEngine:
         logger.info(f"Saved {len(self.all_leads)} leads → {filepath}")
         return str(filepath)
 
+    def save_leads_json(self, output_filename: str = None) -> Optional[str]:
+        if not self.all_leads:
+            logger.warning("No leads to save.")
+            return None
+        if not output_filename:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_filename = f"leads_{ts}.json"
+        data_dir = self.config.get("output", {}).get("output_dir", "data")
+        Path(data_dir).mkdir(parents=True, exist_ok=True)
+        filepath = Path(data_dir) / output_filename
+        filepath.write_text(json.dumps(self.all_leads, indent=2), encoding="utf-8")
+        logger.info(f"Saved {len(self.all_leads)} leads → {filepath}")
+        return str(filepath)
+
     # ── scheduler ─────────────────────────────────────────────────────────────
 
     def start_scheduler(self, frequency_hours: int = 24, start_time: str = "08:00") -> None:
@@ -317,15 +450,64 @@ class LeadScrappingEngine:
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _parse_platforms(value: str) -> List[str]:
+    planner = SearchPlanner()
+    return [planner.normalize_platform(item) for item in (value or "").split(",") if item.strip()]
+
+
+def _parse_csv(value: str) -> List[str]:
+    return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Free/open-source lead generation engine")
+    parser.add_argument("-q", "--query", default="", help="Free-form search intent")
+    parser.add_argument("-p", "--platforms", default="", help="Comma-separated platforms or all")
+    parser.add_argument("-n", "--niche", default=None, help="Niche name from config.yaml")
+    parser.add_argument("-r", "--regions", default="", help="Comma-separated region filters")
+    parser.add_argument("-a", "--amount", type=int, default=None, help="Maximum leads")
+    parser.add_argument("--format", choices=["csv", "json"], default="csv")
+    parser.add_argument("--deep", action="store_true", help="Visit reachable result/profile URLs for extra contacts")
+    parser.add_argument("--browser", action="store_true", help="Use logged-in browser mode where implemented")
+    parser.add_argument("--browser-login", action="store_true", help="Open a local browser login window")
+    parser.add_argument("--browser-profile", default="default", help="Local browser profile name")
+    parser.add_argument("--headful", action="store_true", help="Show browser during browser-mode searches")
+    parser.add_argument("--no-persist", action="store_true", help="Do not use SQLite persistent dedup for this run")
+    args = parser.parse_args()
+
     logger.info("Lead Scraping Engine starting …")
     engine = LeadScrappingEngine("config.yaml")
-    leads = engine.run_scraping()
+    if args.browser_login:
+        report = engine.browser_login(platform="tiktok", profile=args.browser_profile)
+        logger.info("Login window closed for %s profile '%s'", report.platform, report.profile)
+        return
+    platforms = _parse_platforms(args.platforms)
+    if platforms and "all" in [p.lower() for p in platforms]:
+        platforms = None
+    if args.browser and (platforms == ["tiktok"] or "tiktok" in (platforms or [])):
+        leads = engine.scrape_tiktok_browser(
+            search_text=args.query,
+            max_leads=args.amount or 30,
+            profile=args.browser_profile,
+            headful=args.headful,
+            persist=not args.no_persist,
+        )
+    else:
+        leads = engine.run_scraping(
+            platforms=platforms or None,
+            niche=args.niche,
+            regions=_parse_csv(args.regions),
+            max_leads=args.amount,
+            search_text=args.query,
+            persist=not args.no_persist,
+        )
+    if args.deep and leads:
+        leads = engine.deep_enrich_leads(leads)
     if leads:
-        fp = engine.save_leads()
+        fp = engine.save_leads_json() if args.format == "json" else engine.save_leads()
         logger.info(f"✓ {len(leads)} leads saved to {fp}")
     else:
-        logger.warning("⚠  No leads extracted. Check your RAPIDAPI_KEY and platform config.")
+        logger.warning("No leads extracted. Try a more specific search query or broader region.")
     logger.info("Done.")
 
 

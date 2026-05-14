@@ -74,6 +74,9 @@ platforms:
   - name: "instagram"
     enabled: true
     hashtags:
+      - "hvacontario"
+      - "hvacillinois"
+      - "hvacnewyork"
       - "hiring"
       - "freelance"
       - "startup"
@@ -128,23 +131,52 @@ platforms:
     search_groups: true
     community_search: true
 
-# ── RapidAPI ───────────────────────────────────────────────────────────────────
-# Get your free key at https://rapidapi.com
-# One key works for all platforms below.
-# Leave blank to use free fallback scrapers (less reliable).
-rapidapi:
-  key_env: "RAPIDAPI_KEY"           # env var name — do NOT put key here
-  timeout: 15
-  retry_attempts: 2
+# ── Free/open search intelligence ──────────────────────────────────────────────
+# No paid/social APIs are used. Social platforms are discovered with public
+# search-engine queries such as:
+#   "website developer needed" after:2026-05-10 site:x.com
+free_search:
+  search_engine: "duckduckgo_html"
+  max_queries_per_platform: 12
+  rate_limit: 0.5
 
-  # Host names — these are the RapidAPI marketplace endpoints.
-  # They may change over time; verify at rapidapi.com if a platform stops working.
-  hosts:
-    instagram: "instagram-scraper-api2.p.rapidapi.com"
-    twitter:   "twitter241.p.rapidapi.com"
-    linkedin:  "linkedin-data-api.p.rapidapi.com"
-    tiktok:    "tiktok-api23.p.rapidapi.com"
-    youtube:   "youtube-v31.p.rapidapi.com"
+# ── Optional logged-in browser mode ───────────────────────────────────────────
+# This stores Playwright browser profiles locally. Use small batches because
+# logged-in automation can trigger account checks if pushed too hard.
+browser:
+  profile_root: "profiles/browser"
+  default_profile: "default"
+  min_batch_size: 20
+  max_batch_size: 50
+  headless: true
+
+lead_intent_terms:
+  - "website developer needed"
+  - "web designer needed"
+  - "need a website"
+  - "need website built"
+  - "looking for web developer"
+  - "looking for website designer"
+  - "hire web developer"
+  - "freelance developer needed"
+  - "shopify developer needed"
+  - "website redesign needed"
+
+platform_query_terms:
+  twitter:
+    - "\"urgent\" \"website\" (needed OR hiring)"
+    - "\"looking for\" \"developer\""
+    - "\"need\" \"software developer\""
+  instagram:
+    - "HVAC contractor"
+    - "HVAC services"
+    - "#hvacontario"
+    - "#hvacillinois"
+    - "#hvacnewyork"
+  linkedin:
+    - "\"HVAC Owner\""
+    - "\"Founder\" \"need website\""
+    - "\"hiring\" \"developer\""
 
 # ── Region targeting ───────────────────────────────────────────────────────────
 regions:
@@ -177,10 +209,24 @@ extraction:
 # ── Deduplication ──────────────────────────────────────────────────────────────
 deduplication:
   enabled: true
+  persistent: true
+  sqlite_path: "data/leads.sqlite3"
   duplicate_check_fields:
     - "email"
     - "phone"
     - "social_handle"
+
+# ── Lead scoring ───────────────────────────────────────────────────────────────
+scoring:
+  positive_terms:
+    "now": 8
+    "today": 8
+    "this week": 6
+    "whatsapp": 8
+  negative_terms:
+    "tutorial": -15
+    "course": -12
+    "agency hiring": -8
 
 # ── Scheduling ─────────────────────────────────────────────────────────────────
 scheduler:

@@ -1,21 +1,22 @@
-"""
-Social media scrapers — each class tries RapidAPI first and falls back to a
-free/open method when no API key is available.
+"""Free/open social discovery scrapers.
 
-  LinkedInScraper   — RapidAPI → no free fallback (LinkedIn blocks all scraping)
-  FacebookScraper   — placeholder (FB requires Selenium / Graph API)
-  TwitterScraper    — RapidAPI → no free fallback
-  InstagramScraper  — RapidAPI → instaloader fallback
-  TikTokScraper     — RapidAPI → no free fallback  (NEW)
-  YouTubeScraper    — RapidAPI → no free fallback  (NEW)
+The project intentionally avoids paid/social APIs. Where direct scraping is
+fragile or blocked, platform classes use public DuckDuckGo HTML search with
+site filters and extract lead signals from titles, snippets, URLs, and any
+plain HTML that is available.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime
+from urllib.parse import urlparse
 from typing import Dict, List, Optional
+
+from scrapers.web_scraper import WebScraper
+from utils.lead_extractor import LeadExtractor, LeadNormalizer
+from utils.search_planner import SearchPlanner, SearchPlan
+from utils.validators import DataValidator
 
 logger = logging.getLogger(__name__)
 
@@ -24,61 +25,171 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _rapidapi_cfg(config: dict) -> dict:
-    """Pull RapidAPI section from main config."""
-    return config.get("rapidapi", {})
+def _make_lead(
+    *,
+    email: str = "",
+    phone: str = "",
+    company: str = "",
+    handle: str = "",
+    region: str = "",
+    url: str = "",
+    platform: str = "",
+    title: str = "",
+    snippet: str = "",
+    search_query: str = "",
+    context: str = "",
+) -> Dict:
+    profile_url = f"https://instagram.com/{handle}" if platform == "instagram" and handle else ""
+    return LeadNormalizer.normalize_lead({
+        "email": email,
+        "phone": phone,
+        "company_name": company,
+        "social_handle": handle,
+        "region": region,
+        "source_url": url,
+        "source_platform": platform,
+        "post_link": url,
+        "profile_url": profile_url,
+        "title": title,
+        "snippet": snippet,
+        "context": context,
+        "search_query": search_query,
+        "extracted_at": datetime.now().isoformat(),
+    })
 
-def _api_key(config: dict) -> str:
-    cfg = _rapidapi_cfg(config)
-    env_var = cfg.get("key_env", "RAPIDAPI_KEY")
-    return os.getenv(env_var, "")
 
-def _host(config: dict, platform: str) -> str:
-    return _rapidapi_cfg(config).get("hosts", {}).get(platform, "")
+def _handle_from_url(url: str, platform: str) -> str:
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if not parts:
+        return ""
+    if platform == "youtube" and parts[0] in {"watch", "shorts"}:
+        return ""
+    if platform == "linkedin" and parts[0] in {"posts", "feed"}:
+        return ""
+    if platform == "facebook" and parts[0] in {"groups", "posts"}:
+        return ""
+    if parts[0] in {"p", "reel", "status", "watch", "shorts"}:
+        return ""
+    return parts[0].lstrip("@")
+
+
+class SearchBackedSocialScraper:
+    """Shared public-search implementation for API-hostile social platforms."""
+
+    platform = "social"
+
+    def __init__(self, config: dict = None):
+        self.config = config or {}
+        self.planner = SearchPlanner(self.config)
+        self.web = WebScraper(rate_limit=self.config.get("free_search", {}).get("rate_limit", 0.5))
+        self.extractor = LeadExtractor()
+
+    def search_public_posts(
+        self,
+        keywords: List[str],
+        *,
+        regions: List[str] = None,
+        days: int = 7,
+        max_results: int = 20,
+        raw_query: str = "",
+    ) -> List[Dict]:
+        plan = self.planner.plan(query=raw_query, niche_keywords=keywords, regions=regions)
+        per_query = max(2, min(10, max_results))
+        max_queries = self.config.get("free_search", {}).get("max_queries_per_platform", 8)
+        queries = self.planner.queries_for_platform(
+            self.platform,
+            plan,
+            max_queries=max_queries,
+        )
+        leads: List[Dict] = []
+        seen_urls = set()
+
+        for query in queries:
+            for result in self.web.search_documents(query, max_results=per_query):
+                url = result.get("url", "")
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                leads.extend(self._leads_from_search_result(result, plan))
+                if len(seen_urls) >= max_results:
+                    break
+            if len(seen_urls) >= max_results:
+                break
+
+        logger.info("%s public search leads: %s", self.platform.title(), len(leads))
+        return leads
+
+    def _leads_from_search_result(self, result: Dict, plan: SearchPlan) -> List[Dict]:
+        url = result.get("url", "")
+        title = result.get("title", "")
+        snippet = result.get("snippet", "")
+        query = result.get("query", "")
+        text = " ".join([
+            title,
+            snippet,
+            query,
+        ])
+        handle = _handle_from_url(url, self.platform)
+        region = ", ".join(plan.regions)
+        leads: List[Dict] = []
+
+        for email in set(self.extractor.extract_emails(text)):
+            if DataValidator.is_valid_email(email):
+                leads.append(_make_lead(
+                    email=email, handle=handle, region=region,
+                    url=url, platform=self.platform, title=title,
+                    snippet=snippet, search_query=query, context=text,
+                ))
+        for phone in set(self.extractor.extract_phones(text)):
+            if DataValidator.is_valid_phone(phone):
+                leads.append(_make_lead(
+                    phone=phone, handle=handle, region=region,
+                    url=url, platform=self.platform, title=title,
+                    snippet=snippet, search_query=query, context=text,
+                ))
+        for company in set(self.extractor.extract_company_names(text)):
+            if DataValidator.is_valid_company_name(company):
+                leads.append(_make_lead(
+                    company=company, handle=handle, region=region,
+                    url=url, platform=self.platform, title=title,
+                    snippet=snippet, search_query=query, context=text,
+                ))
+
+        if not leads and (handle or url):
+            leads.append(_make_lead(
+                handle=handle,
+                region=region,
+                url=url,
+                platform=self.platform,
+                title=title,
+                snippet=snippet,
+                search_query=query,
+                context=text,
+            ))
+
+        return leads
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LinkedIn
 # ─────────────────────────────────────────────────────────────────────────────
 
-class LinkedInScraper:
-    """LinkedIn lead scraper — RapidAPI only (LinkedIn blocks all public scraping)."""
+class LinkedInScraper(SearchBackedSocialScraper):
+    """LinkedIn lead discovery through public search result pages."""
 
-    def __init__(self, config: dict = None):
-        self.config = config or {}
-        self._key = _api_key(self.config)
-        self._host_name = _host(self.config, "linkedin")
-
-    def _get_api(self):
-        from scrapers.rapidapi_scrapers import RapidLinkedInScraper
-        return RapidLinkedInScraper(
-            host=self._host_name or "linkedin-data-api.p.rapidapi.com",
-            api_key=self._key,
-        )
+    platform = "linkedin"
 
     def search_posts(self, keywords: List[str], days: int = 7) -> List[Dict]:
-        if not self._key:
-            logger.warning("LinkedIn scraper needs RAPIDAPI_KEY — skipped.")
-            return []
-        try:
-            return self._get_api().search_posts(keywords, max_results=20)
-        except Exception as exc:
-            logger.error(f"LinkedIn RapidAPI error: {exc}")
-            return []
+        return self.search_public_posts(keywords, days=days, max_results=20)
 
     def extract_from_post(self, post_text: str, post_url: str) -> List[Dict]:
         """Keep compatibility with main.py which still calls this."""
-        from utils.lead_extractor import LeadExtractor, LeadNormalizer
-        from utils.validators import DataValidator
         extractor = LeadExtractor()
         leads = []
         for email in set(extractor.extract_emails(post_text)):
             if DataValidator.is_valid_email(email):
-                leads.append(LeadNormalizer.normalize_lead({
-                    "email": email, "phone": "", "company_name": "",
-                    "source_url": post_url, "source_platform": "linkedin",
-                    "post_link": post_url, "extracted_at": datetime.now().isoformat(),
-                }))
+                leads.append(_make_lead(email=email, url=post_url, platform="linkedin"))
         return leads
 
 
@@ -86,42 +197,23 @@ class LinkedInScraper:
 # Facebook
 # ─────────────────────────────────────────────────────────────────────────────
 
-class FacebookScraper:
-    """
-    Facebook scraper — placeholder.
+class FacebookScraper(SearchBackedSocialScraper):
+    """Facebook public post/group discovery through search result pages."""
 
-    Facebook's aggressive anti-scraping means reliable access requires either
-    the official Graph API (with a verified app) or a paid proxy service.
-    The extract_from_post() method still works if you feed it text manually.
-    """
-
-    def __init__(self, config: dict = None):
-        self.config = config or {}
-        logger.warning(
-            "FacebookScraper: no reliable free scraping method is available. "
-            "Enable the platform but expect 0 results unless you add a Graph API integration."
-        )
+    platform = "facebook"
 
     def search_groups(self, keywords: List[str], days: int = 7) -> List[Dict]:
-        logger.info("Facebook group search not available without Graph API.")
-        return []
+        return self.search_public_posts(keywords, days=days, max_results=20)
 
     def search_pages(self, keywords: List[str], days: int = 7) -> List[Dict]:
-        logger.info("Facebook page search not available without Graph API.")
-        return []
+        return self.search_public_posts(keywords, days=days, max_results=20)
 
     def extract_from_post(self, post_text: str, post_url: str) -> List[Dict]:
-        from utils.lead_extractor import LeadExtractor, LeadNormalizer
-        from utils.validators import DataValidator
         extractor = LeadExtractor()
         leads = []
         for email in set(extractor.extract_emails(post_text)):
             if DataValidator.is_valid_email(email):
-                leads.append(LeadNormalizer.normalize_lead({
-                    "email": email, "phone": "", "company_name": "",
-                    "source_url": post_url, "source_platform": "facebook",
-                    "post_link": post_url, "extracted_at": datetime.now().isoformat(),
-                }))
+                leads.append(_make_lead(email=email, url=post_url, platform="facebook"))
         return leads
 
 
@@ -129,50 +221,22 @@ class FacebookScraper:
 # Twitter / X
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TwitterScraper:
-    """Twitter/X scraper — RapidAPI (twitter241) with graceful fallback."""
+class TwitterScraper(SearchBackedSocialScraper):
+    """Twitter/X lead discovery through public search result pages."""
 
-    def __init__(self, config: dict = None):
-        self.config = config or {}
-        self._key = _api_key(self.config)
-        self._host_name = _host(self.config, "twitter")
-
-    def _get_api(self):
-        from scrapers.rapidapi_scrapers import RapidTwitterScraper
-        return RapidTwitterScraper(
-            host=self._host_name or "twitter241.p.rapidapi.com",
-            api_key=self._key,
-        )
+    platform = "twitter"
 
     def search_tweets(self, keywords: List[str], hashtags: List[str] = None,
-                      days: int = 7) -> List[Dict]:
-        if not self._key:
-            logger.warning("Twitter scraper needs RAPIDAPI_KEY — skipped.")
-            return []
-
-        results: List[Dict] = []
+                      days: int = 7, raw_query: str = "") -> List[Dict]:
         all_terms = list(keywords or []) + [f"#{h.lstrip('#')}" for h in (hashtags or [])]
-        api = self._get_api()
-
-        for term in all_terms[:5]:          # avoid burning too many API calls
-            try:
-                results.extend(api.search_tweets(term, max_tweets=20, days=days))
-            except Exception as exc:
-                logger.error(f"Twitter search '{term}' error: {exc}")
-        return results
+        return self.search_public_posts(all_terms, days=days, max_results=30, raw_query=raw_query)
 
     def extract_from_tweet(self, tweet_text: str, tweet_url: str) -> List[Dict]:
-        from utils.lead_extractor import LeadExtractor, LeadNormalizer
-        from utils.validators import DataValidator
         extractor = LeadExtractor()
         leads = []
         for email in set(extractor.extract_emails(tweet_text)):
             if DataValidator.is_valid_email(email):
-                leads.append(LeadNormalizer.normalize_lead({
-                    "email": email, "phone": "", "company_name": "",
-                    "source_url": tweet_url, "source_platform": "twitter",
-                    "post_link": tweet_url, "extracted_at": datetime.now().isoformat(),
-                }))
+                leads.append(_make_lead(email=email, url=tweet_url, platform="twitter"))
         return leads
 
 
@@ -183,16 +247,14 @@ class TwitterScraper:
 class InstagramScraper:
     """
     Instagram scraper.
-    Priority: RapidAPI → instaloader (free fallback).
+    Priority: instaloader, then public search result discovery.
     """
 
     def __init__(self, config: dict = None):
         self.config = config or {}
-        self._key = _api_key(self.config)
-        self._host_name = _host(self.config, "instagram")
-        self._loader = None
-        if not self._key:
-            self._loader = self._init_instaloader()
+        self._loader = self._init_instaloader()
+        self._search = SearchBackedSocialScraper(self.config)
+        self._search.platform = "instagram"
 
     # ── instaloader fallback ──────────────────────────────────────────────────
     def _init_instaloader(self):
@@ -204,36 +266,22 @@ class InstagramScraper:
             )
             return loader
         except ImportError:
-            logger.warning("instaloader not installed; Instagram will be skipped without RAPIDAPI_KEY.")
+            logger.warning("instaloader not installed; Instagram will use public search fallback.")
             return None
-
-    # ── RapidAPI path ─────────────────────────────────────────────────────────
-    def _get_api(self):
-        from scrapers.rapidapi_scrapers import RapidInstagramScraper
-        return RapidInstagramScraper(
-            host=self._host_name or "instagram-scraper-api2.p.rapidapi.com",
-            api_key=self._key,
-        )
 
     # ── public interface ──────────────────────────────────────────────────────
     def search_hashtags(self, hashtags: List[str], regions: List[str] = None,
-                        max_posts: int = 30) -> List[Dict]:
-        if self._key:
-            return self._search_via_api(hashtags, regions, max_posts)
-        if self._loader:
-            return self._search_via_instaloader(hashtags, regions, max_posts)
-        logger.warning("Instagram: no API key and instaloader unavailable.")
-        return []
-
-    def _search_via_api(self, hashtags, regions, max_posts) -> List[Dict]:
-        api = self._get_api()
-        leads: List[Dict] = []
-        for tag in hashtags:
-            try:
-                leads.extend(api.search_hashtag(tag, max_posts=max_posts, regions=regions))
-            except Exception as exc:
-                logger.error(f"Instagram API error for #{tag}: {exc}")
-        return leads
+                        max_posts: int = 30, raw_query: str = "") -> List[Dict]:
+        if self._loader and not raw_query:
+            leads = self._search_via_instaloader(hashtags, regions, max_posts)
+            if leads:
+                return leads
+        return self._search.search_public_posts(
+            hashtags,
+            regions=regions,
+            max_results=max_posts,
+            raw_query=raw_query,
+        )
 
     def _search_via_instaloader(self, hashtags, regions, max_posts) -> List[Dict]:
         """Instaloader fallback — slower but free."""
@@ -302,79 +350,37 @@ class InstagramScraper:
 # TikTok  ← NEW
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TikTokScraper:
-    """TikTok lead scraper via RapidAPI."""
+class TikTokScraper(SearchBackedSocialScraper):
+    """TikTok lead discovery through public search result pages."""
 
-    def __init__(self, config: dict = None):
-        self.config = config or {}
-        self._key = _api_key(self.config)
-        self._host_name = _host(self.config, "tiktok")
-
-    def _get_api(self):
-        from scrapers.rapidapi_scrapers import RapidTikTokScraper
-        return RapidTikTokScraper(
-            host=self._host_name or "tiktok-api23.p.rapidapi.com",
-            api_key=self._key,
-        )
+    platform = "tiktok"
 
     def search_hashtags(self, hashtags: List[str], keywords: List[str] = None,
-                        regions: List[str] = None, max_videos: int = 30) -> List[Dict]:
-        if not self._key:
-            logger.warning("TikTok scraper needs RAPIDAPI_KEY — skipped.")
-            return []
-
-        api = self._get_api()
-        leads: List[Dict] = []
-
-        for tag in (hashtags or []):
-            try:
-                leads.extend(api.search_hashtag(tag, max_videos=max_videos, regions=regions))
-            except Exception as exc:
-                logger.error(f"TikTok hashtag #{tag} error: {exc}")
-
-        for kw in (keywords or [])[:3]:    # limit extra calls
-            try:
-                leads.extend(api.search_keyword(kw, max_results=20, regions=regions))
-            except Exception as exc:
-                logger.error(f"TikTok keyword '{kw}' error: {exc}")
-
-        logger.info(f"TikTok total leads: {len(leads)}")
-        return leads
+                        regions: List[str] = None, max_videos: int = 30,
+                        raw_query: str = "") -> List[Dict]:
+        terms = list(hashtags or []) + list(keywords or [])
+        return self.search_public_posts(
+            terms,
+            regions=regions,
+            max_results=max_videos,
+            raw_query=raw_query,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # YouTube  ← NEW
 # ─────────────────────────────────────────────────────────────────────────────
 
-class YouTubeScraper:
-    """YouTube lead scraper via RapidAPI."""
+class YouTubeScraper(SearchBackedSocialScraper):
+    """YouTube lead discovery through public search result pages."""
 
-    def __init__(self, config: dict = None):
-        self.config = config or {}
-        self._key = _api_key(self.config)
-        self._host_name = _host(self.config, "youtube")
-
-    def _get_api(self):
-        from scrapers.rapidapi_scrapers import RapidYouTubeScraper
-        return RapidYouTubeScraper(
-            host=self._host_name or "youtube-v31.p.rapidapi.com",
-            api_key=self._key,
-        )
+    platform = "youtube"
 
     def search(self, keywords: List[str], regions: List[str] = None,
-               max_results: int = 20) -> List[Dict]:
-        if not self._key:
-            logger.warning("YouTube scraper needs RAPIDAPI_KEY — skipped.")
-            return []
-
-        api = self._get_api()
-        leads: List[Dict] = []
-
-        for kw in (keywords or [])[:4]:
-            try:
-                leads.extend(api.search_videos(kw, max_results=max_results, regions=regions))
-            except Exception as exc:
-                logger.error(f"YouTube search '{kw}' error: {exc}")
-
-        logger.info(f"YouTube total leads: {len(leads)}")
-        return leads
+               max_results: int = 20, raw_query: str = "") -> List[Dict]:
+        return self.search_public_posts(
+            keywords,
+            regions=regions,
+            max_results=max_results,
+            raw_query=raw_query,
+        )

@@ -3,10 +3,13 @@ Scheduler module - Schedule periodic lead scraping runs.
 """
 
 import logging
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.cron import CronTrigger
+except ImportError:
+    BackgroundScheduler = None
+    CronTrigger = None
 from typing import Callable, Optional
-import pytz
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +24,14 @@ class ScrapingScheduler:
         Args:
             timezone: Timezone for scheduling
         """
-        self.scheduler = BackgroundScheduler(timezone=timezone)
+        self.scheduler = BackgroundScheduler(timezone=timezone) if BackgroundScheduler else None
         self.is_running = False
     
     def start(self) -> None:
         """Start the scheduler."""
+        if not self.scheduler:
+            logger.warning("APScheduler is not installed; scheduled jobs are disabled.")
+            return
         if not self.is_running:
             self.scheduler.start()
             self.is_running = True
@@ -33,6 +39,8 @@ class ScrapingScheduler:
     
     def stop(self) -> None:
         """Stop the scheduler."""
+        if not self.scheduler:
+            return
         if self.is_running:
             self.scheduler.shutdown()
             self.is_running = False
@@ -54,6 +62,9 @@ class ScrapingScheduler:
             minute: Minute to run (0-59)
             job_id: Unique job identifier
         """
+        if not self.scheduler:
+            logger.warning("APScheduler is not installed; cannot schedule daily job.")
+            return
         trigger = CronTrigger(hour=hour, minute=minute)
         self.scheduler.add_job(
             func,
@@ -78,6 +89,9 @@ class ScrapingScheduler:
             minute: Minute past the hour to run (0-59)
             job_id: Unique job identifier
         """
+        if not self.scheduler:
+            logger.warning("APScheduler is not installed; cannot schedule hourly job.")
+            return
         trigger = CronTrigger(minute=minute)
         self.scheduler.add_job(
             func,
@@ -105,6 +119,9 @@ class ScrapingScheduler:
             job_id: Unique job identifier
         """
         total_seconds = (hours * 3600) + (minutes * 60)
+        if not self.scheduler:
+            logger.warning("APScheduler is not installed; cannot schedule interval job.")
+            return
         self.scheduler.add_job(
             func,
             'interval',
@@ -117,12 +134,16 @@ class ScrapingScheduler:
     
     def remove_job(self, job_id: str) -> None:
         """Remove a scheduled job."""
+        if not self.scheduler:
+            return
         if self.scheduler.get_job(job_id):
             self.scheduler.remove_job(job_id)
             logger.info(f"Removed job: {job_id}")
     
     def list_jobs(self) -> list:
         """List all scheduled jobs."""
+        if not self.scheduler:
+            return []
         jobs = self.scheduler.get_jobs()
         for job in jobs:
             logger.info(f"Job: {job.id}, Next run: {job.next_run_time}")
@@ -130,6 +151,8 @@ class ScrapingScheduler:
     
     def pause_job(self, job_id: str) -> None:
         """Pause a scheduled job."""
+        if not self.scheduler:
+            return
         job = self.scheduler.get_job(job_id)
         if job:
             job.pause()
@@ -137,6 +160,8 @@ class ScrapingScheduler:
     
     def resume_job(self, job_id: str) -> None:
         """Resume a paused job."""
+        if not self.scheduler:
+            return
         job = self.scheduler.get_job(job_id)
         if job:
             job.resume()

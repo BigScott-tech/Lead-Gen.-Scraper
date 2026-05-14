@@ -172,6 +172,13 @@ class LeadNormalizer:
             'source_url': lead.get('source_url', '').strip(),
             'source_platform': lead.get('source_platform', '').strip(),
             'post_link': lead.get('post_link', '').strip(),
+            'profile_url': lead.get('profile_url', '').strip(),
+            'title': lead.get('title', '').strip(),
+            'snippet': lead.get('snippet', '').strip(),
+            'context': lead.get('context', '').strip(),
+            'search_query': lead.get('search_query', '').strip(),
+            'lead_score': lead.get('lead_score', ''),
+            'lead_reason': lead.get('lead_reason', '').strip(),
             'extracted_at': lead.get('extracted_at', ''),
         }
         return normalized

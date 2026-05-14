@@ -4,7 +4,11 @@ Unit tests for lead extraction and validation.
 
 import pytest
 from utils.lead_extractor import LeadExtractor, LeadNormalizer
+from utils.command_parser import parse_search_command
+from utils.lead_scoring import LeadScorer
+from utils.search_planner import SearchPlanner
 from utils.validators import DataValidator, DeduplicateManager
+from scrapers.browser_tiktok import TikTokBrowserScraper
 
 
 class TestLeadExtractor:
@@ -144,3 +148,82 @@ class TestIntegration:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+class TestSearchPlanner:
+    """Test local smart search planning."""
+
+    def test_extract_since_date_from_free_form_query(self):
+        planner = SearchPlanner()
+        plan = planner.plan(query="website developer needed since 10-05-2026")
+
+        assert plan.since.isoformat() == "2026-05-10"
+        assert "website developer needed" in plan.terms
+
+    def test_twitter_queries_use_public_site_filters(self):
+        planner = SearchPlanner()
+        plan = planner.plan(query="website developer needed since 10-05-2026")
+        queries = planner.queries_for_platform("twitter", plan, max_queries=2)
+
+        assert any("site:x.com" in query for query in queries)
+        assert all("since:2026-05-10" in query for query in queries)
+
+    def test_instagram_expands_hvac_region_hashtags(self):
+        planner = SearchPlanner()
+        plan = planner.plan(query="HVAC", regions=["Ontario"])
+        terms = planner.instagram_terms(plan)
+
+        assert "#hvacontario" in terms
+        assert "#hvactoronto" in terms
+
+
+class TestCommandParser:
+    def test_parse_search_command_flags(self):
+        parsed = parse_search_command(
+            '-p x,ig -q "website developer needed" -n 20 -r Ontario '
+            '--format json --deep --browser --headful --profile buyer1'
+        )
+
+        assert parsed.platforms == ["twitter", "instagram"]
+        assert parsed.query == "website developer needed"
+        assert parsed.amount == 20
+        assert parsed.regions == ["Ontario"]
+        assert parsed.output_format == "json"
+        assert parsed.deep is True
+        assert parsed.browser is True
+        assert parsed.headful is True
+        assert parsed.profile == "buyer1"
+
+
+class TestLeadScorer:
+    def test_scores_urgent_contact_higher(self):
+        scorer = LeadScorer()
+        lead = scorer.score({
+            "email": "buyer@example.com",
+            "source_platform": "twitter",
+            "snippet": "Need a website developer urgent today",
+        })
+
+        assert lead["lead_score"] > 50
+        assert "urgent" in lead["lead_reason"]
+
+
+class TestTikTokBrowserScraper:
+    def test_profile_urls_from_video_urls(self):
+        urls = [
+            "https://www.tiktok.com/@hvacpro/video/123",
+            "https://www.tiktok.com/@hvacpro/video/456?lang=en",
+            "https://www.tiktok.com/@other/video/789",
+        ]
+
+        profiles = TikTokBrowserScraper._profile_urls_from_video_urls(urls)
+
+        assert profiles == [
+            "https://www.tiktok.com/@hvacpro",
+            "https://www.tiktok.com/@other",
+        ]
+
+    def test_safe_browser_limit_caps_to_range(self):
+        assert TikTokBrowserScraper._safe_limit(5) == 20
+        assert TikTokBrowserScraper._safe_limit(30) == 30
+        assert TikTokBrowserScraper._safe_limit(100) == 50

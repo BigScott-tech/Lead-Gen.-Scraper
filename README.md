@@ -1,209 +1,135 @@
-# Lead Generation Engine v2.0
+# Lead Generation Engine
 
-A Python-based lead scraping system for **NorthOrbis / AIMA** outreach — extracts emails, phone numbers, company names, and social handles from **7 platforms** using a single RapidAPI key.
+A free/open-source lead discovery system for finding public buying-intent posts and contact details without paid scraping APIs.
 
----
+The engine is built around local search planning plus public web discovery. For a query like:
 
-## What's new in v2.0
+```text
+website developer needed since 10-05-2026
+```
 
-| Area | Change |
+it generates platform-specific searches such as:
+
+```text
+"website developer needed" since:2026-05-10 -filter:retweets site:x.com
+"website developer needed" after:2026-05-10 site:linkedin.com/posts
+#hvacontario site:instagram.com
+```
+
+Then it extracts emails, phones, company names, social handles, post/profile links, snippets, score reasons, and source URLs from public result pages and reachable HTML.
+
+## How It Works
+
+| Layer | Purpose |
 |---|---|
-| **TikTok** | Full hashtag + keyword scraping — new platform |
-| **YouTube** | Channel/video description scraping — new platform |
-| **RapidAPI layer** | All social scrapers now hit real API endpoints instead of placeholder stubs |
-| **Free fallback** | Instagram falls back to instaloader; web uses DuckDuckGo — works without a key |
-| **Async bot fix** | `/scrape` no longer blocks the Telegram event loop (was causing timeouts) |
-| **`/niches` command** | List available niches directly in Telegram |
-| **`/platforms` command** | List all available platforms in Telegram |
-| **Better dedup** | Deduplication now also checks social handles |
-| **phonenumbers lib** | More accurate international phone validation |
-| **Leaner deps** | Removed unused Scrapy/Selenium from requirements |
+| `utils/search_planner.py` | Turns niches, regions, dates, and free-form intent into smart search queries |
+| `utils/lead_scoring.py` | Offline keyword scoring for urgency, buying intent, and contact quality |
+| `utils/lead_store.py` | SQLite persistence so the same lead is not sent again tomorrow |
+| `scrapers/web_scraper.py` | Uses DuckDuckGo HTML search and BeautifulSoup, no API key |
+| `scrapers/social_scrapers.py` | Discovers public posts/profiles with `site:` searches for X/Twitter, LinkedIn, Facebook, Instagram, TikTok, and YouTube |
+| `main.py` | Runs platform scrapers, validates, scores, deduplicates, and saves CSV/JSON output |
+| `bot.py` | Telegram workflow for setting platforms, niches, regions, search text, and downloading results |
 
----
-
-## Architecture
-
-```
-Lead Gen Engine/
-├── scrapers/
-│   ├── web_scraper.py          ← DuckDuckGo → BeautifulSoup (free)
-│   ├── social_scrapers.py      ← Platform scrapers (RapidAPI + fallbacks)
-│   └── rapidapi_scrapers.py    ← Raw RapidAPI HTTP clients (NEW)
-├── utils/
-│   ├── lead_extractor.py       ← Regex email/phone/company extraction
-│   ├── human_behavior.py       ← User-agent rotation, rate limiting
-│   ├── validators.py           ← Validation & deduplication
-│   └── proxy_manager.py        ← Proxy pool (future)
-├── tests/
-│   └── test_extraction.py
-├── data/                       ← Output CSVs land here
-├── config.yaml                 ← Main config (niches, platforms, RapidAPI hosts)
-├── main.py                     ← CLI entry point
-├── bot.py                      ← Telegram bot
-├── scheduler.py                ← APScheduler wrapper
-├── requirements.txt
-├── .env.example                ← Copy to .env and fill in
-└── render.yaml                 ← Render.com deploy config
-```
-
----
-
-## Quick start
-
-### 1 — Clone & create venv
+## Setup
 
 ```bash
-git clone <your-repo>
-cd "Lead Gen Engine"
 python -m venv venv
-source venv/bin/activate       # Windows: venv\Scripts\activate
-```
-
-### 2 — Install dependencies
-
-```bash
+source venv/bin/activate
 pip install -r requirements.txt
-```
-
-### 3 — Configure environment
-
-```bash
 cp .env.example .env
 ```
 
 Edit `.env`:
 
 ```env
-TELEGRAM_BOT_TOKEN=your_bot_token_from_@BotFather
-RAPIDAPI_KEY=your_rapidapi_key          # get free at rapidapi.com
+TELEGRAM_BOT_TOKEN=your_bot_token_from_BotFather
+TELEGRAM_ADMIN_IDS=123456789
+TELEGRAM_ADMIN_TOKEN=optional_shared_auth_token
 ```
 
-### 4 — Run
+`TELEGRAM_ADMIN_IDS` is recommended. `TELEGRAM_ADMIN_TOKEN` enables `/auth <token>` if you want a passphrase-style unlock.
+
+## Run
 
 ```bash
-# One-shot scrape (all platforms, all niches)
-python main.py
-
-# Telegram bot (remote control from your phone)
+python main.py --query "website developer needed since 12-05-2026" --platforms twitter,linkedin --amount 25
+python main.py --query "HVAC Ontario" --platforms instagram --regions Ontario --format json
+python main.py --browser-login --browser-profile default
+python main.py --browser --platforms tiktok --query "HVAC contractor" --amount 30 --browser-profile default
 python bot.py
 ```
 
----
+Browser mode uses Playwright. After installing dependencies, install Chromium once:
 
-## Getting your RapidAPI key
+```bash
+python -m playwright install chromium
+```
 
-1. Go to [rapidapi.com](https://rapidapi.com) and create a free account.
-2. Search for any of the APIs below and subscribe to their **free tier**.
-3. Copy the key from **Apps → My Apps → your app → Security**.
+## Telegram Commands
 
-One key works across all platforms. Free tiers are generous enough for daily lead gen.
+```text
+/start
+/help
+/status
+/auth <admin_token>
+/niches
+/platforms
+/set_target <niche>
+/set_platforms web,twitter,linkedin
+/set_region United States
+/set_amount 50
+/set_query website developer needed since 10-05-2026
+/search -p x,ig -q "website developer needed since 12-05-2026" -n 20
+/search -p instagram -q "HVAC" -r Ontario -n 30
+/config default_region Ontario
+/monitor -p x -q "website developer needed" --every 6h
+/jobs
+/deep
+/browser_login tiktok default
+/browser_search -q "HVAC contractor" -n 30 --profile default
+/export --format json
+/scrape
+/download
+```
 
-| Platform | RapidAPI host (default) | Notes |
-|---|---|---|
-| Instagram | `instagram-scraper-api2.p.rapidapi.com` | |
-| Twitter/X | `twitter241.p.rapidapi.com` | |
-| LinkedIn | `linkedin-data-api.p.rapidapi.com` | |
-| TikTok | `tiktok-api23.p.rapidapi.com` | |
-| YouTube | `youtube-v31.p.rapidapi.com` | |
-
-> **Tip:** If a host goes stale (APIs change), swap it in `config.yaml → rapidapi.hosts` without touching code.
-
----
+`/browser_login` opens a browser window on the machine running the bot, not inside Telegram. Telegram's in-app browser is useful for links, but its cookies do not become Playwright cookies. Log in to TikTok in the local Playwright window, then run `/browser_search`.
 
 ## Platforms
 
-| Platform | Free fallback | Notes |
-|---|---|---|
-| `web` | ✅ DuckDuckGo + BeautifulSoup | Always works |
-| `instagram` | ✅ instaloader | API preferred; instaloader blocked intermittently |
-| `tiktok` | ❌ | Needs RAPIDAPI_KEY |
-| `youtube` | ❌ | Needs RAPIDAPI_KEY |
-| `twitter` | ❌ | Needs RAPIDAPI_KEY |
-| `linkedin` | ❌ | Needs RAPIDAPI_KEY |
-| `facebook` | ❌ | Requires Graph API (not implemented) |
-
----
-
-## Telegram bot commands
-
-```
-/start                  — Initialise session + show settings
-/help                   — Full command reference
-/status                 — Current session settings + API key status
-/niches                 — List available niches from config.yaml
-/platforms              — List available platforms
-/set_target <niche>     — Set niche (must match config.yaml)
-/set_platforms p1,p2,…  — Select platforms (comma-separated)
-/set_region <region>    — Region filter (e.g. Nigeria, U.S.)
-/set_amount <n>         — Lead cap for next scrape
-/scrape                 — Start scrape (runs in background, won't timeout)
-/download               — Download latest CSV
-```
-
----
-
-## Output CSV columns
-
-| Column | Description |
+| Platform | Method |
 |---|---|
-| `email` | Extracted email address |
-| `phone` | Extracted phone number (normalised) |
-| `company_name` | Extracted company name |
-| `social_handle` | Instagram/TikTok/Twitter handle |
-| `region` | Region filter applied during scrape |
-| `source_url` | URL the lead was found on |
-| `source_platform` | Platform name |
-| `post_link` | Direct link to source post |
-| `extracted_at` | ISO 8601 timestamp |
+| `web` | DuckDuckGo HTML search + direct page scraping |
+| `twitter` | Public `site:x.com` and `site:twitter.com` discovery |
+| `linkedin` | Public `site:linkedin.com/posts` discovery |
+| `facebook` | Public `site:facebook.com/groups` and post discovery |
+| `instagram` | Instaloader when available, public search fallback |
+| `tiktok` | Public `site:tiktok.com` discovery |
+| `youtube` | Public `site:youtube.com/watch` and Shorts discovery |
 
----
+## Browser Mode
 
-## Adding new niches
+TikTok has an optional logged-in browser scraper:
 
-Edit `config.yaml`:
+- Uses a persistent local Playwright profile under `profiles/browser/<profile>/tiktok`
+- Opens TikTok search, scrolls results, collects video/profile URLs, visits creator profiles, and extracts visible bio/contact text
+- Caps browser runs to 20-50 leads to reduce account pressure
+- Gives next-step choices in Telegram: continue a small batch, switch account profile, or return to default public search
 
-```yaml
-niches:
-  - name: "Real Estate"
-    keywords:
-      - "real estate agent"
-      - "property manager"
-      - "need property website"
-      - "real estate marketing"
+This is not anonymity. It is a logged-in local browser session. Smaller batches, human review, and separate profiles can reduce repeated session pressure, but they do not make automation invisible.
+
+## Output
+
+CSV files are written to `data/` with these columns:
+
+```text
+email, phone, company_name, social_handle, region, source_url,
+source_platform, post_link, profile_url, title, snippet, search_query,
+lead_score, lead_reason, extracted_at
 ```
 
-Then in Telegram: `/set_target Real Estate`
+## Notes
 
----
-
-## Deploy to Render (free tier)
-
-The `render.yaml` is already configured. Push to GitHub, connect your repo on [render.com](https://render.com), and add the two environment variables in the Render dashboard.
-
----
-
-## Compliance
-
-- Only scrapes **publicly available** data
-- Respects rate limits and adds random delays
-- Does not bypass authentication
-- Log all activity in `scraper.log`
-- Check robots.txt before scraping custom domains
-- Verify compliance with GDPR / local laws for your target regions
-
----
-
-## Troubleshooting
-
-| Problem | Fix |
-|---|---|
-| All platforms return 0 leads | Set `RAPIDAPI_KEY` in `.env` |
-| `ModuleNotFoundError` | Run `pip install -r requirements.txt` |
-| Instagram blocked | Use RapidAPI (set key), instaloader gets blocked intermittently |
-| Bot timeout on `/scrape` | Fixed in v2 — scrape now runs off the event loop |
-| RapidAPI 401 error | Invalid key or not subscribed to that specific API's plan |
-| RapidAPI 429 error | Rate limit hit — the engine retries automatically with backoff |
-
----
-
-**Version:** 2.0.0 | **Updated:** May 2026
+- No paid scraping API is required.
+- Results depend on what public search engines can see.
+- X/Twitter, LinkedIn, Facebook, TikTok, and Instagram heavily limit direct unauthenticated scraping, so public search discovery is more reliable and safer than trying to bypass login walls.
+- Use conservative rates and only process publicly available data.
