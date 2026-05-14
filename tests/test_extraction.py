@@ -161,12 +161,17 @@ class TestSearchPlanner:
         assert "website developer needed" in plan.terms
 
     def test_twitter_queries_use_public_site_filters(self):
-        planner = SearchPlanner()
+        planner = SearchPlanner({
+            "platform_query_terms": {
+                "twitter": ['"looking for a web designer"'],
+            }
+        })
         plan = planner.plan(query="website developer needed since 10-05-2026")
-        queries = planner.queries_for_platform("twitter", plan, max_queries=2)
+        queries = planner.queries_for_platform("twitter", plan, max_queries=4)
 
         assert any("site:x.com" in query for query in queries)
-        assert all("since:2026-05-10" in query for query in queries)
+        assert any("since:2026-05-10" in query for query in queries)
+        assert any("looking for a web designer" in query for query in queries)
 
     def test_instagram_expands_hvac_region_hashtags(self):
         planner = SearchPlanner()

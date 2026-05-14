@@ -7,7 +7,7 @@ from typing import List, Dict, Optional
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 from utils.lead_extractor import LeadExtractor, LeadNormalizer
 from utils.human_behavior import HumanBehavior, RateLimiter
@@ -29,6 +29,7 @@ class WebScraper:
         self.rate_limiter = RateLimiter(rate_limit)
         self.dedup_manager = DeduplicateManager()
         self.session = requests.Session()
+        self.last_search_status: List[Dict] = []
     
     def scrape_url(self, url: str, keywords: List[str] = None) -> List[Dict]:
         """
@@ -84,10 +85,32 @@ class WebScraper:
 
     def search_documents(self, query: str, max_results: int = 10) -> List[Dict]:
         """
-        Perform a DuckDuckGo HTML search and return result metadata.
+        Search multiple public engines and return result metadata.
 
         Returned fields: url, title, snippet, query.
         """
+        self.last_search_status = []
+        providers = [
+            self._search_duckduckgo,
+            self._search_brave,
+            self._search_yahoo,
+        ]
+        seen = set()
+        merged: List[Dict] = []
+        for provider in providers:
+            if len(merged) >= max_results:
+                break
+            docs = provider(query, max_results=max_results)
+            for doc in docs:
+                url = doc.get("url", "")
+                if url and url not in seen:
+                    seen.add(url)
+                    merged.append(doc)
+                    if len(merged) >= max_results:
+                        break
+        return merged
+
+    def _search_duckduckgo(self, query: str, max_results: int = 10) -> List[Dict]:
         try:
             self.rate_limiter.wait_if_needed()
             headers = HumanBehavior.get_headers()
@@ -99,6 +122,9 @@ class WebScraper:
             )
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
+            if self._is_blocked_page(soup):
+                self._record_search_status("duckduckgo", query, "blocked")
+                return []
             results = []
 
             for result in soup.select('.result'):
@@ -113,6 +139,7 @@ class WebScraper:
                         'title': result_link.get_text(' ', strip=True),
                         'snippet': snippet_el.get_text(' ', strip=True) if snippet_el else '',
                         'query': query,
+                        'provider': 'duckduckgo',
                     })
                     if len(results) >= max_results:
                         break
@@ -126,14 +153,136 @@ class WebScraper:
                             'title': anchor.get_text(' ', strip=True),
                             'snippet': '',
                             'query': query,
+                            'provider': 'duckduckgo',
                         })
                         if len(results) >= max_results:
                             break
 
+            self._record_search_status("duckduckgo", query, f"{len(results)} results")
             return results
         except Exception as e:
             logger.error(f"Error during search query '{query}': {e}")
+            self._record_search_status("duckduckgo", query, f"error: {e}")
             return []
+
+    def _search_brave(self, query: str, max_results: int = 10) -> List[Dict]:
+        try:
+            self.rate_limiter.wait_if_needed()
+            response = self.session.get(
+                "https://search.brave.com/search",
+                params={"q": query, "source": "web"},
+                headers=HumanBehavior.get_headers(),
+                timeout=15,
+            )
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            if self._is_blocked_page(soup):
+                self._record_search_status("brave", query, "blocked")
+                return []
+            results: List[Dict] = []
+            for result in soup.select(".snippet"):
+                link = result.find("a", href=True)
+                if not link:
+                    continue
+                href = self._clean_result_url(link["href"])
+                if not href.startswith("http"):
+                    continue
+                title = link.get_text(" ", strip=True)
+                snippet = result.get_text(" ", strip=True)
+                results.append({
+                    "url": href,
+                    "title": title,
+                    "snippet": snippet,
+                    "query": query,
+                    "provider": "brave",
+                })
+                if len(results) >= max_results:
+                    break
+            self._record_search_status("brave", query, f"{len(results)} results")
+            return results
+        except Exception as e:
+            logger.error(f"Brave search error for '{query}': {e}")
+            self._record_search_status("brave", query, f"error: {e}")
+            return []
+
+    def _search_yahoo(self, query: str, max_results: int = 10) -> List[Dict]:
+        try:
+            self.rate_limiter.wait_if_needed()
+            response = self.session.get(
+                "https://search.yahoo.com/search",
+                params={"p": query},
+                headers=HumanBehavior.get_headers(),
+                timeout=15,
+            )
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            if self._is_blocked_page(soup):
+                self._record_search_status("yahoo", query, "blocked")
+                return []
+            results: List[Dict] = []
+            for result in soup.select(".algo"):
+                link = result.find("a", href=True)
+                if not link:
+                    continue
+                href = self._clean_result_url(link["href"])
+                if not href.startswith("http"):
+                    continue
+                title = link.get_text(" ", strip=True)
+                snippet = result.get_text(" ", strip=True)
+                results.append({
+                    "url": href,
+                    "title": title,
+                    "snippet": snippet,
+                    "query": query,
+                    "provider": "yahoo",
+                })
+                if len(results) >= max_results:
+                    break
+            self._record_search_status("yahoo", query, f"{len(results)} results")
+            return results
+        except Exception as e:
+            logger.error(f"Yahoo search error for '{query}': {e}")
+            self._record_search_status("yahoo", query, f"error: {e}")
+            return []
+
+    def _record_search_status(self, provider: str, query: str, status: str) -> None:
+        self.last_search_status.append({
+            "provider": provider,
+            "query": query,
+            "status": status,
+        })
+        logger.info("Search provider %s for '%s': %s", provider, query, status)
+
+    @staticmethod
+    def _is_blocked_page(soup: BeautifulSoup) -> bool:
+        text = soup.get_text(" ", strip=True).lower()
+        blocked_markers = [
+            "please complete the following challenge",
+            "one last step",
+            "solve the challenge",
+            "automated queries",
+            "unusual traffic",
+        ]
+        return any(marker in text for marker in blocked_markers)
+
+    @staticmethod
+    def _clean_result_url(href: str) -> str:
+        if not href:
+            return ""
+        if href.startswith("http"):
+            parsed = urlparse(href)
+            if "r.search.yahoo.com" in parsed.netloc:
+                path = unquote(parsed.path)
+                marker = "/RU="
+                if marker in path:
+                    return path.split(marker, 1)[1].split("/RK=", 1)[0]
+            return href
+        parsed = urlparse(href)
+        qs = parse_qs(parsed.query)
+        for key in ("uddg", "u", "url"):
+            if key in qs and qs[key]:
+                return unquote(qs[key][0])
+        return href
 
     def scrape_search_queries(self, keywords: List[str] = None, regions: List[str] = None,
                               max_results: int = 10, queries: List[str] = None) -> List[Dict]:

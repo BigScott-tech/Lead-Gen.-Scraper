@@ -176,7 +176,7 @@ class LeadScrappingEngine:
                                raw_query=search_text)
 
     def scrape_linkedin(self, niche: str = None, regions: List[str] = None,
-                        search_text: str = "") -> List[Dict]:
+                        search_text: str = "", max_results: int = 20) -> List[Dict]:
         logger.info("── LinkedIn scraping ──")
         scraper = LinkedInScraper(config=self.config)
         platform_cfg = next(
@@ -195,6 +195,7 @@ class LeadScrappingEngine:
             days=days,
             regions=self._region_terms(regions),
             raw_query=search_text,
+            max_results=max_results,
         )
         for post in posts:
             leads.extend(scraper.extract_from_post(post.get("text", ""), post.get("url", "")))
@@ -203,7 +204,7 @@ class LeadScrappingEngine:
         return leads
 
     def scrape_facebook(self, niche: str = None, regions: List[str] = None,
-                        search_text: str = "") -> List[Dict]:
+                        search_text: str = "", max_results: int = 20) -> List[Dict]:
         logger.info("── Facebook scraping ──")
         scraper = FacebookScraper(config=self.config)
         days = self.config.get("time_filters", {}).get("max_age_days", 7)
@@ -219,11 +220,12 @@ class LeadScrappingEngine:
             days=days,
             regions=self._region_terms(regions),
             raw_query=search_text,
+            max_results=max_results,
         ))
         return leads
 
     def scrape_twitter(self, niche: str = None, regions: List[str] = None,
-                       search_text: str = "") -> List[Dict]:
+                       search_text: str = "", max_results: int = 30) -> List[Dict]:
         logger.info("── Twitter scraping ──")
         scraper = TwitterScraper(config=self.config)
         days = self.config.get("time_filters", {}).get("max_age_days", 7)
@@ -240,6 +242,7 @@ class LeadScrappingEngine:
             keywords or [],
             days=days,
             raw_query=search_text,
+            max_results=max_results,
         )
 
     def browser_login(self, platform: str = "tiktok", profile: str = "default",
@@ -262,6 +265,9 @@ class LeadScrappingEngine:
         leads, report = scraper.search(search_text, limit=max_leads)
         leads = DataValidator.filter_leads(leads, require_email=False)
         leads = self.scorer.score_many(leads)
+        minimum_score = int(self.config.get("scoring", {}).get("minimum_score", 0) or 0)
+        if minimum_score:
+            leads = [lead for lead in leads if int(lead.get("lead_score") or 0) >= minimum_score]
         if persist and self.config.get("deduplication", {}).get("persistent", True):
             leads = self.lead_store.filter_new(leads)
         self.all_leads = leads
@@ -326,11 +332,14 @@ class LeadScrappingEngine:
                                                           if p.get("name") == "youtube"), 20),
                                                       search_text=search_text),
             "linkedin":  lambda: self.scrape_linkedin(niche=niche, regions=region_terms,
-                                                       search_text=search_text),
+                                                       search_text=search_text,
+                                                       max_results=limit),
             "facebook":  lambda: self.scrape_facebook(niche=niche, regions=region_terms,
-                                                       search_text=search_text),
+                                                       search_text=search_text,
+                                                       max_results=limit),
             "twitter":   lambda: self.scrape_twitter(niche=niche, regions=region_terms,
-                                                      search_text=search_text),
+                                                      search_text=search_text,
+                                                      max_results=limit),
         }
 
         for platform in platforms:
@@ -357,6 +366,9 @@ class LeadScrappingEngine:
                 unique.append(lead)
 
         unique = self.scorer.score_many(unique)
+        minimum_score = int(self.config.get("scoring", {}).get("minimum_score", 0) or 0)
+        if minimum_score:
+            unique = [lead for lead in unique if int(lead.get("lead_score") or 0) >= minimum_score]
         if limit:
             unique = unique[:limit]
         if persist and self.config.get("deduplication", {}).get("persistent", True):

@@ -79,7 +79,7 @@ class LeadScorer:
     def _lead_text(lead: Dict) -> str:
         fields = [
             "company_name", "social_handle", "region", "source_url",
-            "source_platform", "post_link", "search_query", "title",
+            "source_platform", "post_link", "title",
             "snippet", "context",
         ]
         return " ".join(str(lead.get(field, "")) for field in fields).lower()

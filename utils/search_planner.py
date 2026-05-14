@@ -127,35 +127,36 @@ class SearchPlanner:
         for term in base_terms:
             for region in region_suffixes:
                 base = self._join_parts([self._quote_if_phrase(term), region])
-                if plan.since:
-                    base = self._add_date_operator(platform, base, plan.since)
+                base_variants = self._date_variants(platform, base, plan.since)
                 if platform == "twitter":
-                    base = f"{base} -filter:retweets"
+                    base_variants = [f"{variant} -filter:retweets" for variant in base_variants]
                 if sites:
-                    for site in sites:
-                        queries.append(f"{base} site:{site}")
+                    for variant in base_variants:
+                        for site in sites:
+                            queries.append(f"{variant} site:{site}")
+                            if len(queries) >= max_queries:
+                                return queries
+                else:
+                    for variant in base_variants:
+                        queries.append(variant)
                         if len(queries) >= max_queries:
                             return queries
-                else:
-                    queries.append(base)
-                    if len(queries) >= max_queries:
-                        return queries
         return queries
 
     def terms_for_platform(self, platform: str, plan: SearchPlan) -> List[str]:
         platform = self.normalize_platform(platform)
-        terms = list(plan.terms or self.DEFAULT_INTENT_TERMS)
         configured = self.config.get("platform_query_terms", {}).get(platform, [])
-        terms.extend(configured)
 
         if platform == "twitter":
-            terms.extend(self._twitter_intent_terms(plan.intent))
+            terms = list(configured) + self._twitter_intent_terms(plan.intent) + list(plan.terms or self.DEFAULT_INTENT_TERMS)
         elif platform == "instagram":
-            terms.extend(self.instagram_terms(plan))
+            terms = self.instagram_terms(plan) + list(configured) + list(plan.terms or self.DEFAULT_INTENT_TERMS)
         elif platform == "linkedin":
-            terms.extend(self._linkedin_terms(plan.intent))
+            terms = self._linkedin_terms(plan.intent) + list(configured) + list(plan.terms or self.DEFAULT_INTENT_TERMS)
         elif platform == "youtube":
-            terms.extend(self._youtube_terms(plan.intent))
+            terms = self._youtube_terms(plan.intent) + list(configured) + list(plan.terms or self.DEFAULT_INTENT_TERMS)
+        else:
+            terms = list(configured) + list(plan.terms or self.DEFAULT_INTENT_TERMS)
 
         return self._unique(terms)
 
@@ -222,6 +223,18 @@ class SearchPlanner:
         if platform == "twitter":
             return f"{base} since:{since.isoformat()}"
         return f"{base} after:{since.isoformat()}"
+
+    @staticmethod
+    def _date_variants(platform: str, base: str, since: Optional[date]) -> List[str]:
+        if not since:
+            return [base]
+        if platform == "twitter":
+            return [
+                base,
+                f"{base} since:{since.isoformat()}",
+                f"{base} after:{since.isoformat()}",
+            ]
+        return [f"{base} after:{since.isoformat()}", base]
 
     @staticmethod
     def _first_keyword(terms: Iterable[str]) -> str:

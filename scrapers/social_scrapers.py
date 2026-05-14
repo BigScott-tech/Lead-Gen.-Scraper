@@ -74,6 +74,39 @@ def _handle_from_url(url: str, platform: str) -> str:
     return parts[0].lstrip("@")
 
 
+def _is_platform_url(url: str, platform: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().removeprefix("www.")
+    path = parsed.path.lower()
+    allowed_hosts = {
+        "twitter": {"x.com", "twitter.com"},
+        "linkedin": {"linkedin.com"},
+        "facebook": {"facebook.com", "m.facebook.com"},
+        "instagram": {"instagram.com"},
+        "tiktok": {"tiktok.com"},
+        "youtube": {"youtube.com", "youtu.be"},
+    }
+    if host not in allowed_hosts.get(platform, {host}):
+        return False
+    excluded_prefixes = {
+        "twitter": ("/home", "/explore", "/settings", "/privacy", "/tos", "/i/", "/intent", "/hashtag"),
+        "linkedin": ("/help", "/legal", "/learning", "/pulse/topics"),
+        "facebook": ("/help", "/privacy", "/policies", "/login"),
+        "instagram": ("/accounts", "/about", "/developer", "/legal"),
+        "tiktok": ("/about", "/legal", "/login", "/privacy"),
+        "youtube": ("/about", "/howyoutubeworks", "/intl/"),
+    }
+    return not path.startswith(excluded_prefixes.get(platform, ()))
+
+
+def _has_contact_phone_context(text: str) -> bool:
+    text_lower = text.lower()
+    return any(term in text_lower for term in [
+        "call", "phone", "tel", "text me", "whatsapp", "wa.me", "contact",
+        "sms", "mobile",
+    ])
+
+
 class SearchBackedSocialScraper:
     """Shared public-search implementation for API-hostile social platforms."""
 
@@ -96,7 +129,8 @@ class SearchBackedSocialScraper:
     ) -> List[Dict]:
         plan = self.planner.plan(query=raw_query, niche_keywords=keywords, regions=regions)
         per_query = max(2, min(10, max_results))
-        max_queries = self.config.get("free_search", {}).get("max_queries_per_platform", 8)
+        configured_max_queries = self.config.get("free_search", {}).get("max_queries_per_platform", 8)
+        max_queries = min(configured_max_queries, max(4, max_results))
         queries = self.planner.queries_for_platform(
             self.platform,
             plan,
@@ -110,11 +144,13 @@ class SearchBackedSocialScraper:
                 url = result.get("url", "")
                 if not url or url in seen_urls:
                     continue
+                if not _is_platform_url(url, self.platform):
+                    continue
                 seen_urls.add(url)
                 leads.extend(self._leads_from_search_result(result, plan))
-                if len(seen_urls) >= max_results:
+                if len(leads) >= max_results:
                     break
-            if len(seen_urls) >= max_results:
+            if len(leads) >= max_results:
                 break
 
         logger.info("%s public search leads: %s", self.platform.title(), len(leads))
@@ -128,7 +164,6 @@ class SearchBackedSocialScraper:
         text = " ".join([
             title,
             snippet,
-            query,
         ])
         handle = _handle_from_url(url, self.platform)
         region = ", ".join(plan.regions)
@@ -141,13 +176,14 @@ class SearchBackedSocialScraper:
                     url=url, platform=self.platform, title=title,
                     snippet=snippet, search_query=query, context=text,
                 ))
-        for phone in set(self.extractor.extract_phones(text)):
-            if DataValidator.is_valid_phone(phone):
-                leads.append(_make_lead(
-                    phone=phone, handle=handle, region=region,
-                    url=url, platform=self.platform, title=title,
-                    snippet=snippet, search_query=query, context=text,
-                ))
+        if _has_contact_phone_context(text):
+            for phone in set(self.extractor.extract_phones(text)):
+                if DataValidator.is_valid_phone(phone):
+                    leads.append(_make_lead(
+                        phone=phone, handle=handle, region=region,
+                        url=url, platform=self.platform, title=title,
+                        snippet=snippet, search_query=query, context=text,
+                    ))
         for company in set(self.extractor.extract_company_names(text)):
             if DataValidator.is_valid_company_name(company):
                 leads.append(_make_lead(
@@ -227,9 +263,9 @@ class TwitterScraper(SearchBackedSocialScraper):
     platform = "twitter"
 
     def search_tweets(self, keywords: List[str], hashtags: List[str] = None,
-                      days: int = 7, raw_query: str = "") -> List[Dict]:
+                      days: int = 7, raw_query: str = "", max_results: int = 30) -> List[Dict]:
         all_terms = list(keywords or []) + [f"#{h.lstrip('#')}" for h in (hashtags or [])]
-        return self.search_public_posts(all_terms, days=days, max_results=30, raw_query=raw_query)
+        return self.search_public_posts(all_terms, days=days, max_results=max_results, raw_query=raw_query)
 
     def extract_from_tweet(self, tweet_text: str, tweet_url: str) -> List[Dict]:
         extractor = LeadExtractor()

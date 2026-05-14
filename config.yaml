@@ -152,6 +152,10 @@ browser:
 
 lead_intent_terms:
   - "website developer needed"
+  - "looking for a web designer"
+  - "need help with a website build"
+  - "need someone to build my website"
+  - "can someone build me a website"
   - "web designer needed"
   - "need a website"
   - "need website built"
@@ -164,6 +168,10 @@ lead_intent_terms:
 
 platform_query_terms:
   twitter:
+    - "\"looking for a web designer\""
+    - "\"need help\" \"website build\""
+    - "\"need someone\" \"build my website\""
+    - "\"can someone\" \"build me a website\""
     - "\"urgent\" \"website\" (needed OR hiring)"
     - "\"looking for\" \"developer\""
     - "\"need\" \"software developer\""
@@ -218,6 +226,7 @@ deduplication:
 
 # ── Lead scoring ───────────────────────────────────────────────────────────────
 scoring:
+  minimum_score: 15
   positive_terms:
     "now": 8
     "today": 8
@@ -227,6 +236,20 @@ scoring:
     "tutorial": -15
     "course": -12
     "agency hiring": -8
+    "web developer jobs": -30
+    "design jobs": -25
+    "retweeted": -20
+    "retweets": -20
+    "hashtag on twitter": -25
+    "results on x": -25
+    "google web designer": -25
+    "we specialize": -20
+    "offering web design": -20
+    "visit our website": -15
+    "twitter support": -25
+    "developer platform": -25
+    "looking for my next thing": -30
+    "job seeker": -25
 
 # ── Scheduling ─────────────────────────────────────────────────────────────────
 scheduler:
