@@ -245,7 +245,13 @@ class LeadScrappingEngine:
             max_results=max_results,
         )
 
-    def _finalize_leads(self, leads: List[Dict], limit: int = None, persist: bool = True) -> List[Dict]:
+    def _finalize_leads(
+        self,
+        leads: List[Dict],
+        limit: int = None,
+        persist: bool = True,
+        minimum_score: int | None = None,
+    ) -> List[Dict]:
         filtered = DataValidator.filter_leads(leads, require_email=False)
         unique: List[Dict] = []
         self.dedup.clear()
@@ -259,7 +265,11 @@ class LeadScrappingEngine:
                 unique.append(lead)
 
         unique = self.scorer.score_many(unique)
-        minimum_score = int(self.config.get("scoring", {}).get("minimum_score", 0) or 0)
+        minimum_score = (
+            int(minimum_score)
+            if minimum_score is not None
+            else int(self.config.get("scoring", {}).get("minimum_score", 0) or 0)
+        )
         if minimum_score:
             unique = [lead for lead in unique if int(lead.get("lead_score") or 0) >= minimum_score]
         if limit:
@@ -282,7 +292,12 @@ class LeadScrappingEngine:
             if not lead.get("source_platform"):
                 lead["source_platform"] = "web"
 
-        return self._finalize_leads(leads, limit=max_leads or self.config.get("bot", {}).get("default_amount", 50), persist=persist)
+        return self._finalize_leads(
+            leads,
+            limit=max_leads or self.config.get("bot", {}).get("default_amount", 50),
+            persist=persist,
+            minimum_score=0,
+        )
 
     def browser_login(self, platform: str = "tiktok", profile: str = "default",
                       hold_seconds: int = 180) -> BrowserRunReport:
