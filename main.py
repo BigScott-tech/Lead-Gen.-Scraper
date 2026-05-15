@@ -245,6 +245,45 @@ class LeadScrappingEngine:
             max_results=max_results,
         )
 
+    def _finalize_leads(self, leads: List[Dict], limit: int = None, persist: bool = True) -> List[Dict]:
+        filtered = DataValidator.filter_leads(leads, require_email=False)
+        unique: List[Dict] = []
+        self.dedup.clear()
+        for lead in filtered:
+            if not self.dedup.is_duplicate(
+                email=lead.get("email", ""),
+                phone=lead.get("phone", ""),
+                company=lead.get("company_name", ""),
+                handle=lead.get("social_handle", ""),
+            ):
+                unique.append(lead)
+
+        unique = self.scorer.score_many(unique)
+        minimum_score = int(self.config.get("scoring", {}).get("minimum_score", 0) or 0)
+        if minimum_score:
+            unique = [lead for lead in unique if int(lead.get("lead_score") or 0) >= minimum_score]
+        if limit:
+            unique = unique[:limit]
+        if persist and self.config.get("deduplication", {}).get("persistent", True):
+            unique = self.lead_store.filter_new(unique)
+        return unique
+
+    def scrape_custom_url(self, url: str, max_leads: int = None, persist: bool = True) -> List[Dict]:
+        logger.info("── Custom URL scraping ──")
+        scraper = WebScraper(rate_limit=1.0)
+        try:
+            leads = scraper.scrape_url(url)
+        finally:
+            scraper.close()
+
+        for lead in leads:
+            if not lead.get("source_url"):
+                lead["source_url"] = url
+            if not lead.get("source_platform"):
+                lead["source_platform"] = "web"
+
+        return self._finalize_leads(leads, limit=max_leads or self.config.get("bot", {}).get("default_amount", 50), persist=persist)
+
     def browser_login(self, platform: str = "tiktok", profile: str = "default",
                       hold_seconds: int = 180) -> BrowserRunReport:
         platform = self.search_planner.normalize_platform(platform)
@@ -479,6 +518,7 @@ def main():
     parser.add_argument("-r", "--regions", default="", help="Comma-separated region filters")
     parser.add_argument("-a", "--amount", type=int, default=None, help="Maximum leads")
     parser.add_argument("--format", choices=["csv", "json"], default="csv")
+    parser.add_argument("--url", default=None, help="Single page URL to scrape for leads")
     parser.add_argument("--deep", action="store_true", help="Visit reachable result/profile URLs for extra contacts")
     parser.add_argument("--browser", action="store_true", help="Use logged-in browser mode where implemented")
     parser.add_argument("--browser-login", action="store_true", help="Open a local browser login window")
@@ -496,7 +536,13 @@ def main():
     platforms = _parse_platforms(args.platforms)
     if platforms and "all" in [p.lower() for p in platforms]:
         platforms = None
-    if args.browser and (platforms == ["tiktok"] or "tiktok" in (platforms or [])):
+    if args.url:
+        leads = engine.scrape_custom_url(
+            url=args.url,
+            max_leads=args.amount,
+            persist=not args.no_persist,
+        )
+    elif args.browser and (platforms == ["tiktok"] or "tiktok" in (platforms or [])):
         leads = engine.scrape_tiktok_browser(
             search_text=args.query,
             max_leads=args.amount or 30,

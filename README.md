@@ -56,6 +56,7 @@ python main.py --query "website developer needed since 12-05-2026" --platforms t
 python main.py --query "HVAC Ontario" --platforms instagram --regions Ontario --format json
 python main.py --browser-login --browser-profile default
 python main.py --browser --platforms tiktok --query "HVAC contractor" --amount 30 --browser-profile default
+python main.py --url "https://www.google.com/url?sa=t&source=web&rct=j&url=https://www.linkedin.com/jobs/web-developer-jobs-denver-co"
 python bot.py
 ```
 
@@ -93,6 +94,8 @@ python -m playwright install chromium
 ```
 
 `/browser_login` opens a browser window on the machine running the bot, not inside Telegram. Telegram's in-app browser is useful for links, but its cookies do not become Playwright cookies. Log in to TikTok in the local Playwright window, then run `/browser_search`.
+
+You can also extract contacts directly from a single page URL with `/extract_url <url>` in the bot or `python main.py --url "<page_url>"` from the CLI.
 
 ## Platforms
 

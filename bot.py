@@ -19,6 +19,7 @@ Commands
 /deep                            Enrich latest leads from reachable URLs
 /browser_login                   Open local TikTok login browser
 /browser_search                  Run logged-in TikTok browser search
+/extract_url <url>               Extract leads from a single page URL
 /scrape                          Run scrape with current settings  (async-safe)
 /download                        Download latest CSV
 /niches                          List available niches
@@ -146,6 +147,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/deep — enrich latest batch from reachable URLs\n"
         "/browser\\_login `tiktok default` — open local login browser\n"
         "/browser\\_search `-q \"HVAC\" -n 30 --profile default` — logged-in TikTok run\n"
+        "/extract_url <url>               Extract leads from a single page URL\n"
         "/export `--format csv|json` — download latest results\n"
         "/auth `<admin_token>` — unlock bot if configured\n"
         "/scrape — run scraping job\n"
@@ -332,6 +334,45 @@ async def scrape(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     state = _session(context)
     await _run_scrape(update, context, state)
+
+
+async def extract_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_authorized(update, context):
+        return
+    url = " ".join(context.args).strip()
+    if not url:
+        await update.message.reply_text("Usage: /extract_url <url>", parse_mode="Markdown")
+        return
+
+    await update.message.reply_text(
+        "⏳ Extracting leads from the specified URL…",
+        parse_mode="Markdown",
+    )
+
+    loop = asyncio.get_event_loop()
+    try:
+        leads = await loop.run_in_executor(
+            None,
+            partial(engine.scrape_custom_url, url),
+        )
+    except Exception as exc:
+        logger.error("URL extraction failed: %s", exc, exc_info=True)
+        await update.message.reply_text(f"❌ URL extraction failed: {exc}")
+        return
+
+    if not leads:
+        await update.message.reply_text("⚠️ No leads found for that URL.")
+        return
+
+    filepath = engine.save_leads()
+    state = _session(context)
+    state["last_filepath"] = filepath
+    state["last_format"] = "csv"
+    await update.message.reply_text(
+        f"✅ URL extract complete! Found *{len(leads)}* leads.\n\n"
+        f"Saved to: `{filepath}`",
+        parse_mode="Markdown",
+    )
 
 
 async def _run_scrape(update: Update, context: ContextTypes.DEFAULT_TYPE, state: Dict,
@@ -668,6 +709,7 @@ def main() -> None:
         CommandHandler("deep", deep),
         CommandHandler("browser_login", browser_login),
         CommandHandler("browser_search", browser_search),
+        CommandHandler("extract_url", extract_url),
         CommandHandler("export", export),
         CommandHandler("scrape", scrape),
         CommandHandler("download", download),

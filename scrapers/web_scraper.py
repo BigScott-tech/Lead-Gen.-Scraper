@@ -45,6 +45,7 @@ class WebScraper:
         try:
             self.rate_limiter.wait_if_needed()
             HumanBehavior.random_delay(2, 5)
+            url = self._clean_result_url(url)
             
             logger.info(f"Scraping: {url}")
             
@@ -269,16 +270,19 @@ class WebScraper:
     def _clean_result_url(href: str) -> str:
         if not href:
             return ""
-        if href.startswith("http"):
-            parsed = urlparse(href)
-            if "r.search.yahoo.com" in parsed.netloc:
-                path = unquote(parsed.path)
-                marker = "/RU="
-                if marker in path:
-                    return path.split(marker, 1)[1].split("/RK=", 1)[0]
-            return href
         parsed = urlparse(href)
         qs = parse_qs(parsed.query)
+
+        if parsed.netloc.endswith("google.com") and parsed.path == "/url" and qs.get("url"):
+            return unquote(qs["url"][0])
+        if parsed.netloc.endswith("l.facebook.com") and qs.get("u"):
+            return unquote(qs["u"][0])
+        if "r.search.yahoo.com" in parsed.netloc:
+            path = unquote(parsed.path)
+            marker = "/RU="
+            if marker in path:
+                return path.split(marker, 1)[1].split("/RK=", 1)[0]
+
         for key in ("uddg", "u", "url"):
             if key in qs and qs[key]:
                 return unquote(qs[key][0])

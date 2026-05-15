@@ -9,6 +9,7 @@ from utils.lead_scoring import LeadScorer
 from utils.search_planner import SearchPlanner
 from utils.validators import DataValidator, DeduplicateManager
 from scrapers.browser_tiktok import TikTokBrowserScraper
+from scrapers.web_scraper import WebScraper
 
 
 class TestLeadExtractor:
@@ -211,6 +212,16 @@ class TestLeadScorer:
 
         assert lead["lead_score"] > 50
         assert "urgent" in lead["lead_reason"]
+
+
+class TestWebScraper:
+    def test_clean_result_url_resolves_google_redirects(self):
+        url = (
+            "https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&"
+            "url=https://www.linkedin.com/jobs/web-developer-jobs-denver-co&ved=2ahUKEwiKvMvl7ruUAxVDlWoFHQ3uJAMQFnoECCsQAQ&usg=AOvVaw2Tp2LEY5DgJLLLLDFZBxf3"
+        )
+        resolved = WebScraper._clean_result_url(url)
+        assert resolved.startswith("https://www.linkedin.com/jobs/web-developer-jobs-denver-co")
 
 
 class TestTikTokBrowserScraper:
