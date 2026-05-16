@@ -12,10 +12,15 @@ import csv
 import argparse
 import json
 import logging
+import re
+import shutil
+import subprocess
 import sys
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import quote_plus
 
 import yaml
 
@@ -55,7 +60,8 @@ class LeadScrappingEngine:
     CSV_FIELDS = [
         "email", "phone", "company_name", "social_handle",
         "region", "source_url", "source_platform", "post_link", "profile_url",
-        "title", "snippet", "search_query", "lead_score", "lead_reason",
+        "bio_link", "title", "snippet", "search_query", "lead_type",
+        "confidence", "lead_score", "lead_reason",
         "extracted_at",
     ]
 
@@ -106,6 +112,138 @@ class LeadScrappingEngine:
                 ["web", "instagram", "tiktok", "twitter", "linkedin", "facebook", "youtube"],
             )
         ]
+
+    def _sanitize_for_filename(self, value: str) -> str:
+        sanitized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower())
+        sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+        return sanitized[:40]
+
+    def build_output_filename(
+        self,
+        fmt: str = "csv",
+        query: str = "",
+        platforms: Optional[List[str]] = None,
+        regions: Optional[List[str]] = None,
+        niche: Optional[str] = None,
+    ) -> str:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        parts = ["leads"]
+
+        if query:
+            query_segment = self._sanitize_for_filename(query)
+            if query_segment:
+                parts.append(query_segment)
+
+        if platforms:
+            platform_segment = "_".join(
+                self._sanitize_for_filename(platform) for platform in platforms if platform
+            )
+            if platform_segment:
+                parts.append(platform_segment)
+
+        if regions:
+            region_segment = "_".join(
+                self._sanitize_for_filename(region) for region in regions if region
+            )
+            if region_segment:
+                parts.append(region_segment)
+
+        if niche:
+            niche_segment = self._sanitize_for_filename(niche)
+            if niche_segment:
+                parts.append(niche_segment)
+
+        parts.append(ts)
+        filename = "_".join(p for p in parts if p)
+        return f"{filename}.{fmt}"
+
+    def _browser_fallback_query(
+        self,
+        search_text: str = "",
+        niche: Optional[str] = None,
+        regions: Optional[List[str]] = None,
+    ) -> str:
+        parts: List[str] = []
+        if search_text:
+            parts.append(search_text)
+        if niche:
+            parts.append(niche)
+        if regions:
+            parts.extend([region for region in regions if region])
+        return " ".join(parts).strip()
+
+    def build_browser_fallback_urls(
+        self,
+        query: str = "",
+        platforms: Optional[List[str]] = None,
+        niche: Optional[str] = None,
+        regions: Optional[List[str]] = None,
+    ) -> List[str]:
+        query_text = self._browser_fallback_query(query, niche=niche, regions=regions)
+        urls: List[str] = []
+        platforms = platforms or self._default_platforms()
+
+        for platform in platforms:
+            platform_key = self.search_planner.normalize_platform(platform)
+            query_value = quote_plus(query_text) if query_text else ""
+
+            if platform_key in {"x", "twitter"}:
+                url = f"https://twitter.com/search?q={query_value}&f=live"
+            elif platform_key == "linkedin":
+                url = f"https://www.linkedin.com/search/results/all/?keywords={query_value}"
+            elif platform_key == "facebook":
+                url = f"https://www.facebook.com/search/top?q={query_value}"
+            elif platform_key == "instagram":
+                if query_text.startswith("#"):
+                    tag = quote_plus(query_text.lstrip("#"))
+                    url = f"https://www.instagram.com/explore/tags/{tag}/"
+                elif query_text:
+                    url = f"https://www.instagram.com/explore/search/keyword/?q={query_value}"
+                else:
+                    url = "https://www.instagram.com/"
+            elif platform_key == "tiktok":
+                url = f"https://www.tiktok.com/search?q={query_value}"
+            elif platform_key == "youtube":
+                url = f"https://www.youtube.com/results?search_query={query_value}"
+            elif platform_key == "web":
+                url = f"https://duckduckgo.com/?q={query_value or 'site:instagram.com'}"
+            else:
+                url = f"https://duckduckgo.com/?q={query_value or 'site:instagram.com'}"
+
+            urls.append(url)
+
+        return urls
+
+    def open_search_urls_in_browser(
+        self,
+        urls: List[str],
+        firefox_profile: str | None = None,
+    ) -> List[str]:
+        if not urls:
+            logger.warning("No fallback URLs to open.")
+            return []
+
+        firefox_exe = shutil.which("firefox")
+        if firefox_exe:
+            args: List[str] = [firefox_exe]
+            if firefox_profile:
+                args.extend(["-P", firefox_profile])
+            for url in urls:
+                args.extend(["--new-tab", url])
+            try:
+                subprocess.Popen(args)
+                logger.info("Opened %d browser fallback tab(s) in Firefox.", len(urls))
+                return urls
+            except Exception as exc:
+                logger.warning("Failed to launch Firefox with fallback URLs: %s", exc)
+
+        for i, url in enumerate(urls):
+            if i == 0:
+                webbrowser.open_new_tab(url)
+            else:
+                webbrowser.open_new_tab(url)
+        logger.info("Opened %d browser fallback tab(s) with the system browser.", len(urls))
+        return urls
 
     # ── per-platform scrapers ─────────────────────────────────────────────────
 
@@ -292,12 +430,14 @@ class LeadScrappingEngine:
             if not lead.get("source_platform"):
                 lead["source_platform"] = "web"
 
-        return self._finalize_leads(
+        finalized = self._finalize_leads(
             leads,
             limit=max_leads or self.config.get("bot", {}).get("default_amount", 50),
             persist=persist,
             minimum_score=0,
         )
+        self.all_leads = finalized
+        return finalized
 
     def browser_login(self, platform: str = "tiktok", profile: str = "default",
                       hold_seconds: int = 180) -> BrowserRunReport:
@@ -467,8 +607,7 @@ class LeadScrappingEngine:
             return None
 
         if not output_filename:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_filename = f"leads_{ts}.csv"
+            output_filename = self.build_output_filename("csv")
 
         data_dir = self.config.get("output", {}).get("output_dir", "data")
         Path(data_dir).mkdir(parents=True, exist_ok=True)
@@ -487,8 +626,7 @@ class LeadScrappingEngine:
             logger.warning("No leads to save.")
             return None
         if not output_filename:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_filename = f"leads_{ts}.json"
+            output_filename = self.build_output_filename("json")
         data_dir = self.config.get("output", {}).get("output_dir", "data")
         Path(data_dir).mkdir(parents=True, exist_ok=True)
         filepath = Path(data_dir) / output_filename
@@ -537,7 +675,9 @@ def main():
     parser.add_argument("--deep", action="store_true", help="Visit reachable result/profile URLs for extra contacts")
     parser.add_argument("--browser", action="store_true", help="Use logged-in browser mode where implemented")
     parser.add_argument("--browser-login", action="store_true", help="Open a local browser login window")
-    parser.add_argument("--browser-profile", default="default", help="Local browser profile name")
+    parser.add_argument("--browser-profile", default="default", help="Local browser profile name for Playwright mode")
+    parser.add_argument("--browser-fallback", action="store_true", help="Open manual search tabs in Firefox as a fallback")
+    parser.add_argument("--firefox-profile", default=None, help="Firefox profile for manual browser fallback")
     parser.add_argument("--headful", action="store_true", help="Show browser during browser-mode searches")
     parser.add_argument("--no-persist", action="store_true", help="Do not use SQLite persistent dedup for this run")
     args = parser.parse_args()
@@ -551,6 +691,15 @@ def main():
     platforms = _parse_platforms(args.platforms)
     if platforms and "all" in [p.lower() for p in platforms]:
         platforms = None
+    if args.browser_fallback:
+        urls = engine.build_browser_fallback_urls(
+            query=args.query,
+            platforms=platforms,
+            niche=args.niche,
+            regions=_parse_csv(args.regions),
+        )
+        engine.open_search_urls_in_browser(urls, firefox_profile=args.firefox_profile)
+
     if args.url:
         leads = engine.scrape_custom_url(
             url=args.url,
@@ -577,8 +726,18 @@ def main():
     if args.deep and leads:
         leads = engine.deep_enrich_leads(leads)
     if leads:
-        fp = engine.save_leads_json() if args.format == "json" else engine.save_leads()
-        logger.info(f"✓ {len(leads)} leads saved to {fp}")
+        output_filename = engine.build_output_filename(
+            args.format,
+            query=args.query,
+            platforms=platforms,
+            regions=_parse_csv(args.regions),
+            niche=args.niche,
+        )
+        fp = engine.save_leads_json(output_filename) if args.format == "json" else engine.save_leads(output_filename)
+        if fp:
+            logger.info(f"✓ {len(leads)} leads saved to {fp}")
+        else:
+            logger.warning("Leads were extracted but no output file was written.")
     else:
         logger.warning("No leads extracted. Try a more specific search query or broader region.")
     logger.info("Done.")

@@ -26,7 +26,7 @@ Then it extracts emails, phones, company names, social handles, post/profile lin
 | `utils/lead_scoring.py` | Offline keyword scoring for urgency, buying intent, and contact quality |
 | `utils/lead_store.py` | SQLite persistence so the same lead is not sent again tomorrow |
 | `scrapers/web_scraper.py` | Uses DuckDuckGo HTML search and BeautifulSoup, no API key |
-| `scrapers/social_scrapers.py` | Discovers public posts/profiles with `site:` searches for X/Twitter, LinkedIn, Facebook, Instagram, TikTok, and YouTube |
+| `scrapers/social_scrapers.py` | Discovers public posts/profiles/communities with `site:` searches for X/Twitter, LinkedIn, Facebook, Instagram, TikTok, and YouTube |
 | `main.py` | Runs platform scrapers, validates, scores, deduplicates, and saves CSV/JSON output |
 | `bot.py` | Telegram workflow for setting platforms, niches, regions, search text, and downloading results |
 
@@ -53,9 +53,13 @@ TELEGRAM_ADMIN_TOKEN=optional_shared_auth_token
 
 ```bash
 python main.py --query "website developer needed since 12-05-2026" --platforms twitter,linkedin --amount 25
+python main.py --query "website developer needed since 14-05-2026" --platforms x --amount 25 --format json
+python main.py --query "#hvacontario" --platforms instagram --amount 30 --format json
+python main.py --query "HVAC contractor Ontario" --platforms facebook --amount 30
 python main.py --query "HVAC Ontario" --platforms instagram --regions Ontario --format json
 python main.py --browser-login --browser-profile default
 python main.py --browser --platforms tiktok --query "HVAC contractor" --amount 30 --browser-profile default
+python main.py --query "HVAC contractor Ontario" --platforms linkedin,facebook --browser-fallback --firefox-profile default
 python main.py --url "https://www.google.com/url?sa=t&source=web&rct=j&url=https://www.linkedin.com/jobs/web-developer-jobs-denver-co"
 python bot.py
 ```
@@ -120,15 +124,29 @@ TikTok has an optional logged-in browser scraper:
 
 This is not anonymity. It is a logged-in local browser session. Smaller batches, human review, and separate profiles can reduce repeated session pressure, but they do not make automation invisible.
 
+## Manual Browser Fallback
+
+Use the new `--browser-fallback` option to open platform search pages in your local Firefox browser while the CLI run continues. This is useful when public search discovery is being blocked or when you want to inspect signed-in search results manually.
+
+```bash
+python main.py --query "HVAC contractor Ontario" --platforms linkedin,facebook --browser-fallback --firefox-profile default
+```
+
+If Firefox is installed, the fallback uses the `firefox` binary. If not, it falls back to the system default browser.
+
 ## Output
 
 CSV files are written to `data/` with these columns:
 
 ```text
 email, phone, company_name, social_handle, region, source_url,
-source_platform, post_link, profile_url, title, snippet, search_query,
-lead_score, lead_reason, extracted_at
+source_platform, post_link, profile_url, bio_link, title, snippet,
+search_query, lead_type, confidence, lead_score, lead_reason, extracted_at
 ```
+
+For social searches, `post_link` points to the discovered post/reel/video when available,
+`profile_url` points to the creator/company/group profile, and `bio_link` captures a
+visible external profile/bio link when a public result exposes one.
 
 ## Notes
 
