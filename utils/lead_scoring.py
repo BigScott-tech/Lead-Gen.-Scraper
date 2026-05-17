@@ -62,9 +62,35 @@ class LeadScorer:
         if lead.get("social_handle"):
             score += 4
             reasons.append("+4 handle")
+        if lead.get("profile_url"):
+            score += 4
+            reasons.append("+4 profile")
+        if lead.get("bio_link"):
+            score += 6
+            reasons.append("+6 bio link")
         if lead.get("source_platform") in {"twitter", "linkedin"}:
             score += 4
             reasons.append("+4 intent platform")
+        lead_type = lead.get("lead_type", "")
+        if lead_type == "buyer_intent_post":
+            score += 18
+            reasons.append("+18 buyer intent")
+        elif lead_type == "local_business_profile":
+            score += 14
+            reasons.append("+14 local profile")
+        elif lead_type == "community":
+            score += 8
+            reasons.append("+8 community")
+        elif lead_type == "low_intent_social_result":
+            score -= 25
+            reasons.append("-25 low intent")
+        if (
+            lead.get("source_platform") == "linkedin"
+            and "/jobs/view/" in str(lead.get("post_link", ""))
+            and lead.get("company_name")
+        ):
+            score += 8
+            reasons.append("+8 job listing")
 
         lead["lead_score"] = max(0, min(100, score))
         lead["lead_reason"] = "; ".join(reasons[:6])
@@ -80,6 +106,6 @@ class LeadScorer:
         fields = [
             "company_name", "social_handle", "region", "source_url",
             "source_platform", "post_link", "title",
-            "snippet", "context",
+            "profile_url", "bio_link", "snippet", "context", "lead_type",
         ]
         return " ".join(str(lead.get(field, "")) for field in fields).lower()

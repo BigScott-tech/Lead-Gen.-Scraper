@@ -18,8 +18,8 @@ class LeadExtractor:
     
     # Phone patterns (US format, international)
     PHONE_PATTERNS = [
-        re.compile(r'\+?1?[-.\s]?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'),  # US/CA
-        re.compile(r'\+?[0-9]{1,3}[-.\s]?[0-9]{1,4}[-.\s]?[0-9]{1,4}[-.\s]?[0-9]{1,9}\b'),  # International
+        re.compile(r'(?<!\d)\+?1?[-.\s]?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b(?!\d)'),  # US/CA
+        re.compile(r'(?<!\d)\+?[0-9]{1,3}[-.\s]?[0-9]{1,4}[-.\s]?[0-9]{1,4}[-.\s]?[0-9]{1,9}\b(?!\d)'),  # International
     ]
     
     # Company name patterns
@@ -61,7 +61,8 @@ class LeadExtractor:
             for phone in matches:
                 # Clean up the phone number
                 cleaned = re.sub(r'[^\d+]', '', phone)
-                if len(cleaned) >= 10 and cleaned not in phones:
+                digit_count = len(re.sub(r'\D', '', cleaned))
+                if 10 <= digit_count <= 15 and cleaned not in phones:
                     phones.append(cleaned)
         
         return list(set(phones))  # Remove duplicates
@@ -79,7 +80,7 @@ class LeadExtractor:
             for company in matches:
                 if isinstance(company, tuple):
                     company = company[0]
-                company = company.strip()
+                company = re.sub(r'\s+', ' ', company).strip(" -|,\n\t")
                 if len(company) > 2 and company not in companies:
                     companies.append(company)
         
@@ -173,10 +174,13 @@ class LeadNormalizer:
             'source_platform': lead.get('source_platform', '').strip(),
             'post_link': lead.get('post_link', '').strip(),
             'profile_url': lead.get('profile_url', '').strip(),
+            'bio_link': lead.get('bio_link', '').strip(),
             'title': lead.get('title', '').strip(),
             'snippet': lead.get('snippet', '').strip(),
             'context': lead.get('context', '').strip(),
             'search_query': lead.get('search_query', '').strip(),
+            'lead_type': lead.get('lead_type', '').strip(),
+            'confidence': lead.get('confidence', ''),
             'lead_score': lead.get('lead_score', ''),
             'lead_reason': lead.get('lead_reason', '').strip(),
             'extracted_at': lead.get('extracted_at', ''),

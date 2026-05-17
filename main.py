@@ -13,14 +13,11 @@ import argparse
 import json
 import logging
 import re
-import shutil
-import subprocess
 import sys
-import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus
 
 import yaml
 
@@ -34,10 +31,12 @@ from scrapers.social_scrapers import (
     YouTubeScraper,
 )
 from scrapers.browser_tiktok import TikTokBrowserScraper, BrowserRunReport
+from scrapers.browser_x import XBrowserScraper
 from utils.validators import DataValidator, DeduplicateManager
 from utils.search_planner import SearchPlanner
 from utils.lead_scoring import LeadScorer
 from utils.lead_store import LeadStore
+from utils.browser_launcher import BrowserLauncher
 from scheduler import ScrapingScheduler
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -214,36 +213,168 @@ class LeadScrappingEngine:
 
         return urls
 
+    def custom_search_definitions(
+        self,
+        searches: Optional[List[str]] = None,
+        platforms: Optional[List[str]] = None,
+    ) -> List[Dict]:
+        """Return configured custom browser-search links by name."""
+        configured = self.config.get("custom_searches", [])
+        if isinstance(configured, dict):
+            configured = configured.get("links") or configured.get("searches") or []
+
+        selected = {self._slug(item) for item in (searches or []) if item}
+        include_all = bool(selected.intersection({"all", "*", "enabled"}))
+        selected_names = selected - {"all", "*", "enabled"}
+        platform_filter = {
+            self.search_planner.normalize_platform(platform)
+            for platform in (platforms or [])
+            if platform
+        }
+
+        definitions: List[Dict] = []
+        for index, item in enumerate(configured):
+            if isinstance(item, str):
+                item = {"name": f"custom_{index + 1}", "url": item, "enabled": True}
+            if not isinstance(item, dict):
+                continue
+
+            name = str(item.get("name") or item.get("label") or f"custom_{index + 1}")
+            name_key = self._slug(name)
+            enabled = item.get("enabled", True) is not False
+            explicitly_selected = name_key in selected_names
+
+            if selected_names and not explicitly_selected:
+                continue
+            if not selected_names and not include_all and not enabled:
+                continue
+            if include_all and not enabled:
+                continue
+
+            item_platforms = {
+                self.search_planner.normalize_platform(platform)
+                for platform in item.get("platforms", [])
+                if platform
+            }
+            if (
+                platform_filter
+                and item_platforms
+                and not explicitly_selected
+                and not platform_filter.intersection(item_platforms)
+            ):
+                continue
+
+            definition = dict(item)
+            definition["name"] = name
+            definitions.append(definition)
+
+        return definitions
+
+    def build_custom_search_urls(
+        self,
+        query: str = "",
+        searches: Optional[List[str]] = None,
+        platforms: Optional[List[str]] = None,
+        niche: Optional[str] = None,
+        regions: Optional[List[str]] = None,
+        extra_urls: Optional[List[str]] = None,
+    ) -> List[str]:
+        """Build URLs from custom config templates and one-off CLI templates."""
+        query_text = self._browser_fallback_query(query, niche=niche, regions=regions)
+        region_text = ", ".join(self._region_terms(regions))
+        platform_text = ",".join(platforms or [])
+        context = {
+            "query": query_text,
+            "raw_query": query or "",
+            "query_plus": quote_plus(query_text),
+            "query_encoded": quote(query_text),
+            "raw_query_plus": quote_plus(query or ""),
+            "raw_query_encoded": quote(query or ""),
+            "region": region_text,
+            "region_plus": quote_plus(region_text),
+            "region_encoded": quote(region_text),
+            "niche": niche or "",
+            "niche_plus": quote_plus(niche or ""),
+            "niche_encoded": quote(niche or ""),
+            "platform": platform_text,
+            "platforms": platform_text,
+        }
+
+        urls: List[str] = []
+        if searches:
+            for definition in self.custom_search_definitions(searches, platforms=platforms):
+                template = definition.get("url") or definition.get("template")
+                if template:
+                    urls.append(self._format_search_url_template(str(template), context))
+
+        for template in extra_urls or []:
+            urls.append(self._format_search_url_template(str(template), context))
+
+        return self._unique_urls(urls)
+
+    def build_manual_search_urls(
+        self,
+        query: str = "",
+        platforms: Optional[List[str]] = None,
+        niche: Optional[str] = None,
+        regions: Optional[List[str]] = None,
+        custom_searches: Optional[List[str]] = None,
+        extra_urls: Optional[List[str]] = None,
+    ) -> List[str]:
+        urls = self.build_browser_fallback_urls(
+            query=query,
+            platforms=platforms,
+            niche=niche,
+            regions=regions,
+        )
+        urls.extend(self.build_custom_search_urls(
+            query=query,
+            searches=custom_searches,
+            platforms=platforms,
+            niche=niche,
+            regions=regions,
+            extra_urls=extra_urls,
+        ))
+        return self._unique_urls(urls)
+
     def open_search_urls_in_browser(
         self,
         urls: List[str],
         firefox_profile: str | None = None,
+        browser_app: str = "firefox",
+        new_window: bool = False,
     ) -> List[str]:
-        if not urls:
-            logger.warning("No fallback URLs to open.")
-            return []
+        result = BrowserLauncher.open_urls(
+            urls,
+            app=browser_app,
+            profile=firefox_profile,
+            new_window=new_window,
+        )
+        return result.urls
 
-        firefox_exe = shutil.which("firefox")
-        if firefox_exe:
-            args: List[str] = [firefox_exe]
-            if firefox_profile:
-                args.extend(["-P", firefox_profile])
-            for url in urls:
-                args.extend(["--new-tab", url])
-            try:
-                subprocess.Popen(args)
-                logger.info("Opened %d browser fallback tab(s) in Firefox.", len(urls))
-                return urls
-            except Exception as exc:
-                logger.warning("Failed to launch Firefox with fallback URLs: %s", exc)
+    @staticmethod
+    def _format_search_url_template(template: str, context: Dict[str, str]) -> str:
+        class _SafeDict(dict):
+            def __missing__(self, key):
+                return ""
 
-        for i, url in enumerate(urls):
-            if i == 0:
-                webbrowser.open_new_tab(url)
-            else:
-                webbrowser.open_new_tab(url)
-        logger.info("Opened %d browser fallback tab(s) with the system browser.", len(urls))
-        return urls
+        return template.format_map(_SafeDict(context))
+
+    @staticmethod
+    def _slug(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+    @staticmethod
+    def _unique_urls(urls: List[str]) -> List[str]:
+        seen = set()
+        unique: List[str] = []
+        for url in urls:
+            item = str(url or "").strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            unique.append(item)
+        return unique
 
     # ── per-platform scrapers ─────────────────────────────────────────────────
 
@@ -439,12 +570,45 @@ class LeadScrappingEngine:
         self.all_leads = finalized
         return finalized
 
+    def scrape_custom_urls(
+        self,
+        urls: List[str],
+        max_leads: int = None,
+        persist: bool = True,
+    ) -> List[Dict]:
+        logger.info("── Custom URL batch scraping ──")
+        scraper = WebScraper(rate_limit=1.0)
+        raw: List[Dict] = []
+        try:
+            for url in self._unique_urls(urls):
+                leads = scraper.scrape_url(url)
+                for lead in leads:
+                    if not lead.get("source_url"):
+                        lead["source_url"] = url
+                    if not lead.get("source_platform"):
+                        lead["source_platform"] = "web"
+                raw.extend(leads)
+        finally:
+            scraper.close()
+
+        finalized = self._finalize_leads(
+            raw,
+            limit=max_leads or self.config.get("bot", {}).get("default_amount", 50),
+            persist=persist,
+            minimum_score=0,
+        )
+        self.all_leads = finalized
+        return finalized
+
     def browser_login(self, platform: str = "tiktok", profile: str = "default",
                       hold_seconds: int = 180) -> BrowserRunReport:
         platform = self.search_planner.normalize_platform(platform)
-        if platform != "tiktok":
-            raise ValueError("Browser login is currently implemented for TikTok only.")
-        scraper = TikTokBrowserScraper(config=self.config, profile=profile, headless=False)
+        if platform == "tiktok":
+            scraper = TikTokBrowserScraper(config=self.config, profile=profile, headless=False)
+        elif platform == "twitter":
+            scraper = XBrowserScraper(config=self.config, profile=profile, headless=False)
+        else:
+            raise ValueError("Browser login is currently implemented for TikTok and X/Twitter.")
         self.last_browser_report = scraper.open_login_window(hold_seconds=hold_seconds)
         return self.last_browser_report
 
@@ -452,6 +616,26 @@ class LeadScrappingEngine:
                               profile: str = "default", headful: bool = False,
                               persist: bool = True) -> List[Dict]:
         scraper = TikTokBrowserScraper(
+            config=self.config,
+            profile=profile,
+            headless=not headful,
+        )
+        leads, report = scraper.search(search_text, limit=max_leads)
+        leads = DataValidator.filter_leads(leads, require_email=False)
+        leads = self.scorer.score_many(leads)
+        minimum_score = int(self.config.get("scoring", {}).get("minimum_score", 0) or 0)
+        if minimum_score:
+            leads = [lead for lead in leads if int(lead.get("lead_score") or 0) >= minimum_score]
+        if persist and self.config.get("deduplication", {}).get("persistent", True):
+            leads = self.lead_store.filter_new(leads)
+        self.all_leads = leads
+        self.last_browser_report = report
+        return leads
+
+    def scrape_x_browser(self, search_text: str, max_leads: int = 100,
+                         profile: str = "default", headful: bool = False,
+                         persist: bool = True) -> List[Dict]:
+        scraper = XBrowserScraper(
             config=self.config,
             profile=profile,
             headless=not headful,
@@ -663,6 +847,24 @@ def _parse_csv(value: str) -> List[str]:
     return [item.strip() for item in (value or "").split(",") if item.strip()]
 
 
+def _read_url_file(path: str) -> List[str]:
+    urls: List[str] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        item = line.strip()
+        if item and not item.startswith("#"):
+            urls.append(item)
+    return urls
+
+
+def _browser_platform_from_platforms(platforms: Optional[List[str]], default: str = "tiktok") -> str:
+    normalized = [SearchPlanner().normalize_platform(platform) for platform in (platforms or [])]
+    if "twitter" in normalized:
+        return "twitter"
+    if "tiktok" in normalized:
+        return "tiktok"
+    return default
+
+
 def main():
     parser = argparse.ArgumentParser(description="Free/open-source lead generation engine")
     parser.add_argument("-q", "--query", default="", help="Free-form search intent")
@@ -672,38 +874,87 @@ def main():
     parser.add_argument("-a", "--amount", type=int, default=None, help="Maximum leads")
     parser.add_argument("--format", choices=["csv", "json"], default="csv")
     parser.add_argument("--url", default=None, help="Single page URL to scrape for leads")
+    parser.add_argument("--url-file", default=None, help="Line-delimited file of URLs to scrape")
     parser.add_argument("--deep", action="store_true", help="Visit reachable result/profile URLs for extra contacts")
     parser.add_argument("--browser", action="store_true", help="Use logged-in browser mode where implemented")
     parser.add_argument("--browser-login", action="store_true", help="Open a local browser login window")
     parser.add_argument("--browser-profile", default="default", help="Local browser profile name for Playwright mode")
-    parser.add_argument("--browser-fallback", action="store_true", help="Open manual search tabs in Firefox as a fallback")
+    parser.add_argument("--browser-fallback", action="store_true", help="Open manual search tabs in a local browser")
+    parser.add_argument("--browser-app", default="firefox", help="Browser app for manual tabs: firefox, brave, chrome, chromium, system")
+    parser.add_argument("--browser-new-window", action="store_true", help="Open manual tabs in a new browser window")
     parser.add_argument("--firefox-profile", default=None, help="Firefox profile for manual browser fallback")
+    parser.add_argument("--custom-searches", default="", help="Comma-separated custom search names from config.yaml, or all")
+    parser.add_argument("--custom-link", action="append", default=[], help="Ad-hoc URL/template to open; supports {query_plus}")
+    parser.add_argument("--list-custom-searches", action="store_true", help="List configured custom search links")
+    parser.add_argument("--print-search-links", action="store_true", help="Print manual browser search URLs")
+    parser.add_argument("--links-only", action="store_true", help="Handle manual search links, then skip scraping")
     parser.add_argument("--headful", action="store_true", help="Show browser during browser-mode searches")
     parser.add_argument("--no-persist", action="store_true", help="Do not use SQLite persistent dedup for this run")
     args = parser.parse_args()
 
     logger.info("Lead Scraping Engine starting …")
     engine = LeadScrappingEngine("config.yaml")
-    if args.browser_login:
-        report = engine.browser_login(platform="tiktok", profile=args.browser_profile)
-        logger.info("Login window closed for %s profile '%s'", report.platform, report.profile)
+    if args.list_custom_searches:
+        for definition in engine.custom_search_definitions(["all"]):
+            print(f"{definition.get('name')}: {definition.get('url') or definition.get('template')}")
         return
+
     platforms = _parse_platforms(args.platforms)
     if platforms and "all" in [p.lower() for p in platforms]:
         platforms = None
-    if args.browser_fallback:
-        urls = engine.build_browser_fallback_urls(
+
+    if args.browser_login:
+        login_platform = _browser_platform_from_platforms(platforms)
+        report = engine.browser_login(platform=login_platform, profile=args.browser_profile)
+        logger.info("Login window closed for %s profile '%s'", report.platform, report.profile)
+        return
+
+    regions = _parse_csv(args.regions)
+    custom_searches = _parse_csv(args.custom_searches)
+    manual_links_requested = (
+        args.browser_fallback
+        or args.print_search_links
+        or args.links_only
+        or bool(custom_searches)
+        or bool(args.custom_link)
+    )
+    if manual_links_requested:
+        urls = engine.build_manual_search_urls(
             query=args.query,
             platforms=platforms,
             niche=args.niche,
-            regions=_parse_csv(args.regions),
+            regions=regions,
+            custom_searches=custom_searches,
+            extra_urls=args.custom_link,
         )
-        engine.open_search_urls_in_browser(urls, firefox_profile=args.firefox_profile)
+        if args.print_search_links or args.links_only or (not args.browser_fallback and (custom_searches or args.custom_link)):
+            print("\n".join(urls))
+        if args.browser_fallback:
+            engine.open_search_urls_in_browser(
+                urls,
+                firefox_profile=args.firefox_profile,
+                browser_app=args.browser_app,
+                new_window=args.browser_new_window,
+            )
+        if args.links_only:
+            return
 
-    if args.url:
-        leads = engine.scrape_custom_url(
-            url=args.url,
+    target_urls = [args.url] if args.url else []
+    if args.url_file:
+        target_urls.extend(_read_url_file(args.url_file))
+
+    if target_urls:
+        leads = engine.scrape_custom_urls(
+            urls=target_urls,
             max_leads=args.amount,
+            persist=not args.no_persist,
+        )
+    elif args.browser and "twitter" in (platforms or []):
+        leads = engine.scrape_x_browser(
+            search_text=args.query,
+            max_leads=args.amount or 100,
+            profile=args.browser_profile,
+            headful=args.headful,
             persist=not args.no_persist,
         )
     elif args.browser and (platforms == ["tiktok"] or "tiktok" in (platforms or [])):
@@ -718,7 +969,7 @@ def main():
         leads = engine.run_scraping(
             platforms=platforms or None,
             niche=args.niche,
-            regions=_parse_csv(args.regions),
+            regions=regions,
             max_leads=args.amount,
             search_text=args.query,
             persist=not args.no_persist,
@@ -730,7 +981,7 @@ def main():
             args.format,
             query=args.query,
             platforms=platforms,
-            regions=_parse_csv(args.regions),
+            regions=regions,
             niche=args.niche,
         )
         fp = engine.save_leads_json(output_filename) if args.format == "json" else engine.save_leads(output_filename)

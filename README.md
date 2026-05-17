@@ -58,8 +58,14 @@ python main.py --query "#hvacontario" --platforms instagram --amount 30 --format
 python main.py --query "HVAC contractor Ontario" --platforms facebook --amount 30
 python main.py --query "HVAC Ontario" --platforms instagram --regions Ontario --format json
 python main.py --browser-login --browser-profile default
+python main.py --browser-login --platforms x --browser-profile default
 python main.py --browser --platforms tiktok --query "HVAC contractor" --amount 30 --browser-profile default
+python main.py --browser --platforms tiktok --query "HVAC" --amount 200 --browser-profile default
+python main.py --browser --platforms x --query "website developer needed since:2026-05-14" --amount 200 --browser-profile default --headful
 python main.py --query "HVAC contractor Ontario" --platforms linkedin,facebook --browser-fallback --firefox-profile default
+python main.py --query "HVAC contractor Ontario" --platforms linkedin --browser-fallback --custom-searches linkedin_posts,google --browser-app firefox --links-only
+python main.py --query "HVAC contractor Ontario" --platforms linkedin --print-search-links --custom-searches all
+python main.py --url-file urls.txt --amount 50
 python main.py --url "https://www.google.com/url?sa=t&source=web&rct=j&url=https://www.linkedin.com/jobs/web-developer-jobs-denver-co"
 python bot.py
 ```
@@ -90,14 +96,17 @@ python -m playwright install chromium
 /monitor -p x -q "website developer needed" --every 6h
 /jobs
 /deep
-/browser_login tiktok default
+/browser_login x default
 /browser_search -q "HVAC contractor" -n 30 --profile default
+/browser_search -p x -q "website developer needed since:2026-05-14" -n 200 --profile default --headful
+/browser_links -q "HVAC contractor" -p linkedin --custom all
+/custom_searches
 /export --format json
 /scrape
 /download
 ```
 
-`/browser_login` opens a browser window on the machine running the bot, not inside Telegram. Telegram's in-app browser is useful for links, but its cookies do not become Playwright cookies. Log in to TikTok in the local Playwright window, then run `/browser_search`.
+`/browser_login` opens a browser window on the machine running the bot, not inside Telegram. Telegram's in-app browser is useful for links, but its cookies do not become Playwright cookies. Log in to X or TikTok in the local Playwright window, then run `/browser_search`.
 
 You can also extract contacts directly from a single page URL with `/extract_url <url>` in the bot or `python main.py --url "<page_url>"` from the CLI.
 
@@ -106,7 +115,7 @@ You can also extract contacts directly from a single page URL with `/extract_url
 | Platform | Method |
 |---|---|
 | `web` | DuckDuckGo HTML search + direct page scraping |
-| `twitter` | Public `site:x.com` and `site:twitter.com` discovery |
+| `twitter` | Public `site:x.com` discovery, optional logged-in browser search |
 | `linkedin` | Public `site:linkedin.com/posts` discovery |
 | `facebook` | Public `site:facebook.com/groups` and post discovery |
 | `instagram` | Instaloader when available, public search fallback |
@@ -115,11 +124,27 @@ You can also extract contacts directly from a single page URL with `/extract_url
 
 ## Browser Mode
 
-TikTok has an optional logged-in browser scraper:
+X/Twitter and TikTok have optional logged-in browser scrapers. They use persistent
+local Playwright profiles under `profiles/browser/<profile>/<platform>`.
+
+For X lead searches:
+
+```bash
+python main.py --browser-login --platforms x --browser-profile default
+python main.py --browser --platforms x --query "website developer needed since:2026-05-14" --amount 200 --browser-profile default --headful
+```
+
+The X browser scraper opens X live search, scrolls results, captures each post URL,
+user profile URL, handle, post text, visible timestamp, emails/phones when present,
+and filters out posts outside the requested date window. If you provide `since:`,
+it adds `until:` for tomorrow so "through today" is included by X's exclusive
+`until` operator.
+
+TikTok browser mode:
 
 - Uses a persistent local Playwright profile under `profiles/browser/<profile>/tiktok`
 - Opens TikTok search, scrolls results, collects video/profile URLs, visits creator profiles, and extracts visible bio/contact text
-- Caps browser runs to 20-50 leads to reduce account pressure
+- Caps browser runs to 20-250 leads by default; keep larger runs slower and review-heavy
 - Gives next-step choices in Telegram: continue a small batch, switch account profile, or return to default public search
 
 This is not anonymity. It is a logged-in local browser session. Smaller batches, human review, and separate profiles can reduce repeated session pressure, but they do not make automation invisible.
@@ -132,7 +157,33 @@ Use the new `--browser-fallback` option to open platform search pages in your lo
 python main.py --query "HVAC contractor Ontario" --platforms linkedin,facebook --browser-fallback --firefox-profile default
 ```
 
-If Firefox is installed, the fallback uses the `firefox` binary. If not, it falls back to the system default browser.
+If Firefox is already open, the fallback opens new tabs in that existing signed-in session. You can also choose another local browser:
+
+```bash
+python main.py --query "website developer needed" --platforms linkedin --browser-fallback --browser-app brave
+python main.py --query "website developer needed" --platforms linkedin --print-search-links --links-only
+```
+
+## Custom Search Links
+
+Edit `custom_searches.links` in `config.yaml` to add your own signed-in search pages. Link templates support placeholders such as `{query_plus}`, `{raw_query_plus}`, `{region_plus}`, and `{niche_plus}`.
+
+```yaml
+custom_searches:
+  links:
+    - name: "my_linkedin_sales_search"
+      enabled: true
+      platforms: ["linkedin"]
+      url: "https://www.linkedin.com/search/results/people/?keywords={query_plus}"
+```
+
+Use them from the CLI:
+
+```bash
+python main.py -q "HVAC contractor Ontario" -p linkedin --browser-fallback --custom-searches my_linkedin_sales_search
+python main.py -q "HVAC contractor Ontario" --custom-link "https://www.google.com/search?q={query_plus}+email" --browser-fallback --links-only
+python main.py --list-custom-searches
+```
 
 ## Output
 

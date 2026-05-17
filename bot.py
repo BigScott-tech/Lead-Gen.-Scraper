@@ -17,8 +17,10 @@ Commands
 /monitor <query>                 Run recurring searches
 /jobs                            List active monitors
 /deep                            Enrich latest leads from reachable URLs
-/browser_login                   Open local TikTok login browser
-/browser_search                  Run logged-in TikTok browser search
+/browser_login                   Open local X/TikTok login browser
+/browser_search                  Run logged-in X/TikTok browser search
+/browser_links                   Open local signed-in browser search tabs
+/custom_searches                 List configured custom browser searches
 /extract_url <url>               Extract leads from a single page URL
 /scrape                          Run scrape with current settings  (async-safe)
 /download                        Download latest CSV
@@ -145,8 +147,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/monitor `-p x -q \"website needed\" --every 6h` — recurring search\n"
         "/jobs — list active monitor jobs\n"
         "/deep — enrich latest batch from reachable URLs\n"
-        "/browser\\_login `tiktok default` — open local login browser\n"
-        "/browser\\_search `-q \"HVAC\" -n 30 --profile default` — logged-in TikTok run\n"
+        "/browser\\_login `x default` — open local X/TikTok login browser\n"
+        "/browser\\_search `-p x -q \"website developer needed since:2026-05-14\" -n 200 --profile default` — logged-in browser run\n"
+        "/browser\\_links `-q \"HVAC\" -p linkedin --custom all` — open local search tabs\n"
+        "/custom\\_searches — list configured custom browser searches\n"
         "/extract_url <url>               Extract leads from a single page URL\n"
         "/export `--format csv|json` — download latest results\n"
         "/auth `<admin_token>` — unlock bot if configured\n"
@@ -517,22 +521,26 @@ async def browser_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     amount = parsed.amount or state.get("amount", 30)
     profile = parsed.profile or state.get("browser_profile", "default")
+    platform_source = parsed.platforms or state.get("platforms", [])
+    browser_platform = "twitter" if "twitter" in platform_source else "tiktok"
     state["search_query"] = query
     state["browser_profile"] = profile
     await update.message.reply_text(
-        f"Browser TikTok search started with profile `{profile}`. "
-        "This mode intentionally caps runs to 20-50 leads.",
+        f"Browser {browser_platform} search started with profile `{profile}`. "
+        "This uses a local logged-in Playwright profile.",
         parse_mode="Markdown",
     )
     loop = asyncio.get_event_loop()
     try:
-        leads = await loop.run_in_executor(
-            None,
-            partial(engine.scrape_tiktok_browser, search_text=query,
-                    max_leads=amount, profile=profile, headful=parsed.headful),
-        )
+        if browser_platform == "twitter":
+            run = partial(engine.scrape_x_browser, search_text=query,
+                          max_leads=amount, profile=profile, headful=parsed.headful)
+        else:
+            run = partial(engine.scrape_tiktok_browser, search_text=query,
+                          max_leads=amount, profile=profile, headful=parsed.headful)
+        leads = await loop.run_in_executor(None, run)
     except Exception as exc:
-        await update.message.reply_text(f"Browser TikTok search failed: {exc}")
+        await update.message.reply_text(f"Browser {browser_platform} search failed: {exc}")
         return
 
     filepath = engine.save_leads()
@@ -546,7 +554,7 @@ async def browser_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         [InlineKeyboardButton("Switch account", callback_data="browser_switch_account")],
     ])
     await update.message.reply_text(
-        "✅ Browser TikTok run complete.\n\n"
+        f"✅ Browser {browser_platform} run complete.\n\n"
         f"Collected: {len(leads)}\n"
         f"Visited profiles: {report.visited_profiles if report else 'unknown'}\n"
         f"Profile: `{profile}`\n\n"
@@ -579,6 +587,71 @@ async def browser_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "Use `/browser_login tiktok another_profile_name` to open a separate browser profile.",
             parse_mode="Markdown",
         )
+
+
+async def custom_searches_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_authorized(update, context):
+        return
+    definitions = engine.custom_search_definitions(["all"])
+    if not definitions:
+        await update.message.reply_text("No custom browser searches are configured.")
+        return
+    text = "Configured custom browser searches:\n\n" + "\n".join(
+        f"- {definition.get('name')}: {definition.get('url') or definition.get('template')}"
+        for definition in definitions
+    )
+    await update.message.reply_text(text)
+
+
+async def browser_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_authorized(update, context):
+        return
+    try:
+        parsed = parse_search_command(context.args)
+    except ValueError as exc:
+        await update.message.reply_text(f"Bad browser links command: {exc}")
+        return
+
+    state = _session(context)
+    query = parsed.query or state.get("search_query", "")
+    platforms = parsed.platforms or state.get("platforms", ALL_PLATFORMS)
+    state_regions = [
+        item.strip()
+        for item in str(state.get("region", "")).split(",")
+        if item.strip()
+    ]
+    regions = parsed.regions or state_regions
+    urls = engine.build_manual_search_urls(
+        query=query,
+        platforms=platforms,
+        niche=state.get("target_niche"),
+        regions=regions,
+        custom_searches=parsed.custom_searches,
+        extra_urls=parsed.custom_links,
+    )
+    if not urls:
+        await update.message.reply_text(
+            "Usage: /browser_links `-q \"HVAC\" -p linkedin --custom all`",
+            parse_mode="Markdown",
+        )
+        return
+
+    await update.message.reply_text(
+        f"Opening {len(urls)} local browser tab(s) on the bot machine."
+    )
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None,
+        partial(
+            engine.open_search_urls_in_browser,
+            urls,
+            firefox_profile=parsed.firefox_profile,
+            browser_app=parsed.browser_app,
+        ),
+    )
+    preview = "\n".join(urls[:5])
+    suffix = "\n..." if len(urls) > 5 else ""
+    await update.message.reply_text(f"Opened links:\n{preview}{suffix}")
 
 
 async def export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -709,6 +782,8 @@ def main() -> None:
         CommandHandler("deep", deep),
         CommandHandler("browser_login", browser_login),
         CommandHandler("browser_search", browser_search),
+        CommandHandler("browser_links", browser_links),
+        CommandHandler("custom_searches", custom_searches_command),
         CommandHandler("extract_url", extract_url),
         CommandHandler("export", export),
         CommandHandler("scrape", scrape),

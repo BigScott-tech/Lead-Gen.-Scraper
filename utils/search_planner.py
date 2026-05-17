@@ -40,11 +40,14 @@ class SearchPlanner:
         "twitter": ["x.com", "twitter.com"],
         "x": ["x.com", "twitter.com"],
         "linkedin": ["linkedin.com/posts", "linkedin.com/feed/update", "linkedin.com/in"],
-        "facebook": ["facebook.com/groups", "facebook.com/posts"],
-        "instagram": ["instagram.com", "instagram.com/p", "instagram.com/reel"],
-        "ig": ["instagram.com", "instagram.com/p", "instagram.com/reel"],
-        "tiktok": ["tiktok.com"],
-        "youtube": ["youtube.com/watch", "youtube.com/shorts"],
+        "facebook": [
+            "facebook.com/groups", "facebook.com/posts", "facebook.com/pages",
+            "facebook.com/permalink.php", "m.facebook.com/groups",
+        ],
+        "instagram": ["instagram.com", "instagram.com/p", "instagram.com/reel", "instagram.com/explore/tags"],
+        "ig": ["instagram.com", "instagram.com/p", "instagram.com/reel", "instagram.com/explore/tags"],
+        "tiktok": ["tiktok.com/@", "tiktok.com/tag", "tiktok.com"],
+        "youtube": ["youtube.com/watch", "youtube.com/shorts", "youtube.com/@"],
     }
 
     PLATFORM_ALIASES: Dict[str, str] = {
@@ -77,7 +80,7 @@ class SearchPlanner:
     }
 
     _SINCE_RE = re.compile(
-        r"\bsince\s+(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})\b",
+        r"\bsince:?\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b",
         flags=re.IGNORECASE,
     )
 
@@ -146,23 +149,38 @@ class SearchPlanner:
     def terms_for_platform(self, platform: str, plan: SearchPlan) -> List[str]:
         platform = self.normalize_platform(platform)
         configured = self.config.get("platform_query_terms", {}).get(platform, [])
+        planned = list(plan.terms or self.DEFAULT_INTENT_TERMS)
+        primary = planned[:1]
+        rest = planned[1:]
 
         if platform == "twitter":
-            terms = list(configured) + self._twitter_intent_terms(plan.intent) + list(plan.terms or self.DEFAULT_INTENT_TERMS)
+            terms = primary + list(configured) + self._twitter_intent_terms(plan.intent) + rest
         elif platform == "instagram":
-            terms = self.instagram_terms(plan) + list(configured) + list(plan.terms or self.DEFAULT_INTENT_TERMS)
+            terms = self.instagram_terms(plan) + primary + list(configured) + rest
         elif platform == "linkedin":
-            terms = self._linkedin_terms(plan.intent) + list(configured) + list(plan.terms or self.DEFAULT_INTENT_TERMS)
+            terms = primary + list(configured) + self._linkedin_terms(plan.intent) + rest
+        elif platform == "facebook":
+            terms = primary + list(configured) + self._facebook_terms(plan.intent) + rest
+        elif platform == "tiktok":
+            terms = primary + list(configured) + self._tiktok_terms(plan.intent) + rest
         elif platform == "youtube":
-            terms = self._youtube_terms(plan.intent) + list(configured) + list(plan.terms or self.DEFAULT_INTENT_TERMS)
+            terms = primary + list(configured) + self._youtube_terms(plan.intent) + rest
         else:
-            terms = list(configured) + list(plan.terms or self.DEFAULT_INTENT_TERMS)
+            terms = primary + list(configured) + rest
 
         return self._unique(terms)
 
     def instagram_terms(self, plan: SearchPlan) -> List[str]:
         terms: List[str] = []
         raw_text = " ".join([plan.raw_query, " ".join(plan.terms)]).lower()
+        hashtags = self._hashtags(plan.raw_query)
+        for tag in hashtags:
+            terms.append(f"#{tag}")
+            terms.append(tag)
+            expanded = self._expand_compound_hashtag(tag)
+            if expanded:
+                terms.append(expanded)
+
         target = "hvac" if "hvac" in raw_text else self._first_keyword(plan.terms)
 
         if target:
@@ -191,16 +209,22 @@ class SearchPlanner:
         if not match:
             return None
 
-        first, second, year = [int(part) for part in match.groups()]
-        if year < 100:
-            year += 2000
-
+        parts = [int(part) for part in re.split(r"[-/]", match.group(1))]
         candidates = []
-        for month, day in ((first, second), (second, first)):
+        if len(str(parts[0])) == 4:
             try:
-                candidates.append(date(year, month, day))
+                candidates.append(date(parts[0], parts[1], parts[2]))
             except ValueError:
-                continue
+                pass
+        else:
+            first, second, year = parts
+            if year < 100:
+                year += 2000
+            for month, day in ((first, second), (second, first)):
+                try:
+                    candidates.append(date(year, month, day))
+                except ValueError:
+                    continue
 
         if not candidates:
             return None
@@ -230,9 +254,9 @@ class SearchPlanner:
             return [base]
         if platform == "twitter":
             return [
-                base,
                 f"{base} since:{since.isoformat()}",
                 f"{base} after:{since.isoformat()}",
+                base,
             ]
         return [f"{base} after:{since.isoformat()}", base]
 
@@ -270,6 +294,34 @@ class SearchPlanner:
         return ['"owner"', '"founder"', '"hiring"']
 
     @staticmethod
+    def _facebook_terms(intent: str) -> List[str]:
+        if intent == "local_service":
+            return [
+                '"HVAC" "Ontario"',
+                '"HVAC contractor"',
+                '"need" "contractor"',
+                '"recommend" "contractor"',
+                '"homeowners" "HVAC"',
+            ]
+        if intent == "software_work":
+            return [
+                '"need a website"',
+                '"looking for web developer"',
+                '"small business" "website"',
+                '"startup" "website"',
+                '"recommend" "web designer"',
+            ]
+        return ['"looking for"', '"recommendation"', '"small business"']
+
+    @staticmethod
+    def _tiktok_terms(intent: str) -> List[str]:
+        if intent == "local_service":
+            return ['"HVAC" "Ontario"', '"HVAC contractor"', '"home services"', '"small business"']
+        if intent == "software_work":
+            return ['"need a website"', '"web developer"', '"startup"', '"small business website"']
+        return ['"small business"', '"contact"', '"looking for"']
+
+    @staticmethod
     def _youtube_terms(intent: str) -> List[str]:
         if intent == "local_service":
             return ['"HVAC" "contact"', '"HVAC contractor"', '"HVAC services"']
@@ -280,7 +332,7 @@ class SearchPlanner:
     @staticmethod
     def _quote_if_phrase(term: str) -> str:
         term = " ".join((term or "").split())
-        if not term or term.startswith('"') or " " not in term:
+        if not term or term.startswith('"') or term.startswith("#") or " " not in term:
             return term
         return f'"{term}"'
 
@@ -299,3 +351,25 @@ class SearchPlanner:
                 seen.add(key)
                 unique.append(item)
         return unique
+
+    @staticmethod
+    def _hashtags(text: str) -> List[str]:
+        return [match.group(1).lower() for match in re.finditer(r"#([A-Za-z0-9_]+)", text or "")]
+
+    @staticmethod
+    def _expand_compound_hashtag(tag: str) -> str:
+        tag = (tag or "").lower().lstrip("#")
+        known_regions = [
+            "ontario", "illinois", "newyork", "ny", "texas", "california", "florida",
+            "toronto", "ottawa", "hamilton", "mississauga", "london", "chicago",
+        ]
+        for region in known_regions:
+            if tag.endswith(region) and tag != region:
+                base = tag[: -len(region)]
+                clean_region = {
+                    "newyork": "New York",
+                    "ny": "New York",
+                }.get(region, region.title())
+                if base:
+                    return f"{base} {clean_region}"
+        return ""

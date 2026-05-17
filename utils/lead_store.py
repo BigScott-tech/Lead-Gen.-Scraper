@@ -108,11 +108,23 @@ class LeadStore:
 
     @staticmethod
     def fingerprint(lead: Dict) -> str:
-        parts = [
+        contact_parts = [
             lead.get("email", "").lower().strip(),
             lead.get("phone", "").strip(),
             lead.get("social_handle", "").lower().strip(),
-            lead.get("source_url", "").lower().strip(),
         ]
+        if any(contact_parts):
+            parts = contact_parts
+        else:
+            parts = [
+                lead.get("post_link", "").lower().strip(),
+                lead.get("profile_url", "").lower().strip(),
+                lead.get("bio_link", "").lower().strip(),
+                lead.get("company_name", "").lower().strip(),
+                lead.get("title", "").lower().strip(),
+                lead.get("region", "").lower().strip(),
+                lead.get("lead_type", "").lower().strip(),
+                lead.get("source_url", "").lower().strip(),
+            ]
         raw = "|".join(part for part in parts if part) or json.dumps(lead, sort_keys=True)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()

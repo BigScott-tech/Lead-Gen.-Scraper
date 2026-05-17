@@ -148,7 +148,44 @@ browser:
   default_profile: "default"
   min_batch_size: 20
   max_batch_size: 50
+  tiktok_max_batch_size: 250
+  x_max_batch_size: 250
+  x_scroll_rounds: 0
   headless: true
+
+# ── Custom browser search links ───────────────────────────────────────────────
+# Used when selected with --custom-searches, --custom-link, /browser_links, or
+# --print-search-links. Templates can use:
+#   {query}, {query_plus}, {raw_query_plus}, {region_plus}, {niche_plus}
+custom_searches:
+  links:
+    - name: "google"
+      enabled: true
+      url: "https://www.google.com/search?q={query_plus}"
+
+    - name: "linkedin_posts"
+      enabled: true
+      platforms: ["linkedin"]
+      url: "https://www.linkedin.com/search/results/content/?keywords={query_plus}"
+
+    - name: "linkedin_people"
+      enabled: true
+      platforms: ["linkedin"]
+      url: "https://www.linkedin.com/search/results/people/?keywords={query_plus}"
+
+    - name: "facebook_groups"
+      enabled: true
+      platforms: ["facebook"]
+      url: "https://www.facebook.com/search/groups?q={query_plus}"
+
+    - name: "x_live"
+      enabled: true
+      platforms: ["twitter"]
+      url: "https://x.com/search?q={query_plus}&f=live"
+
+    - name: "reddit"
+      enabled: true
+      url: "https://www.reddit.com/search/?q={query_plus}"
 
 lead_intent_terms:
   - "website developer needed"

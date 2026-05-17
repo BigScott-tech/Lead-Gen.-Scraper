@@ -21,6 +21,10 @@ class SearchCommand:
     browser: bool = False
     headful: bool = False
     profile: str = "default"
+    custom_searches: List[str] = field(default_factory=list)
+    custom_links: List[str] = field(default_factory=list)
+    browser_app: str = "firefox"
+    firefox_profile: str | None = None
 
 
 class _Parser(argparse.ArgumentParser):
@@ -44,6 +48,10 @@ def parse_search_command(text_or_args: str | Iterable[str]) -> SearchCommand:
     parser.add_argument("--browser", action="store_true")
     parser.add_argument("--headful", action="store_true")
     parser.add_argument("--profile", default="default")
+    parser.add_argument("--custom", "--custom-search", "--custom-searches", default="")
+    parser.add_argument("--link", "--custom-link", action="append", default=[])
+    parser.add_argument("--browser-app", default="firefox")
+    parser.add_argument("--firefox-profile", default=None)
     parser.add_argument("free_query", nargs="*")
     ns = parser.parse_args(tokens)
 
@@ -53,6 +61,7 @@ def parse_search_command(text_or_args: str | Iterable[str]) -> SearchCommand:
         if item.strip()
     ]
     regions = [item.strip() for item in ns.region.split(",") if item.strip()]
+    custom_searches = [item.strip() for item in ns.custom.split(",") if item.strip()]
     query = ns.query or " ".join(ns.free_query).strip()
 
     return SearchCommand(
@@ -65,4 +74,8 @@ def parse_search_command(text_or_args: str | Iterable[str]) -> SearchCommand:
         browser=bool(ns.browser),
         headful=bool(ns.headful),
         profile=ns.profile,
+        custom_searches=custom_searches,
+        custom_links=ns.link,
+        browser_app=ns.browser_app,
+        firefox_profile=ns.firefox_profile,
     )

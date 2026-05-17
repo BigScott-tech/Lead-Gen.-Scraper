@@ -66,26 +66,38 @@ class TikTokBrowserScraper:
         )
 
     def search(self, query: str, limit: int = 30) -> tuple[List[Dict], BrowserRunReport]:
-        effective_limit = self._safe_limit(limit)
+        browser_cfg = self.config.get("browser", {})
+        effective_limit = self._safe_limit(
+            limit,
+            max_limit=int(browser_cfg.get("tiktok_max_batch_size", 250) or 250),
+        )
         leads: List[Dict] = []
         visited_profiles = 0
+        seen_profiles: set[str] = set()
 
         with self._playwright() as p:
             context = self._launch_context(p, headless=self.headless)
             page = context.new_page()
-            search_url = self.SEARCH_URL.format(query=quote_plus(query))
-            page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
-            self._human_scroll(page, rounds=4)
-
-            video_urls = self._collect_video_urls(page, max_urls=effective_limit * 3)
-            profile_urls = self._profile_urls_from_video_urls(video_urls)
-
-            for profile_url in profile_urls:
+            for search_query in self._query_variants(query):
                 if len(leads) >= effective_limit:
                     break
-                profile_leads = self._scrape_profile(context, profile_url, query)
-                visited_profiles += 1
-                leads.extend(profile_leads or [self._lead_from_profile_url(profile_url, query)])
+                logger.info("TikTok browser search query: %s", search_query)
+                if not self._goto_search(page, search_query):
+                    continue
+                self._human_scroll(page, rounds=self._scroll_rounds(effective_limit))
+
+                video_urls = self._collect_video_urls(page, max_urls=effective_limit * 3)
+                profile_urls = self._profile_urls_from_video_urls(video_urls)
+
+                for profile_url in profile_urls:
+                    if len(leads) >= effective_limit:
+                        break
+                    if profile_url in seen_profiles:
+                        continue
+                    seen_profiles.add(profile_url)
+                    profile_leads = self._scrape_profile(context, profile_url, search_query)
+                    visited_profiles += 1
+                    leads.extend(profile_leads or [self._lead_from_profile_url(profile_url, search_query)])
 
             context.close()
 
@@ -105,6 +117,44 @@ class TikTokBrowserScraper:
             ],
         )
         return leads, report
+
+    def _goto_search(self, page, query: str) -> bool:
+        try:
+            page.goto(
+                self.SEARCH_URL.format(query=quote_plus(query)),
+                wait_until="commit",
+                timeout=45000,
+            )
+            page.wait_for_timeout(2200)
+            return True
+        except Exception as exc:
+            logger.warning("TikTok search navigation timed out/failed for %s: %s", query, exc)
+            return False
+
+    @staticmethod
+    def _query_variants(query: str) -> List[str]:
+        query = " ".join((query or "").split()) or "HVAC"
+        variants = [query]
+        lowered = query.lower()
+        if "hvac" in lowered or "air conditioning" in lowered or "furnace" in lowered:
+            variants.extend([
+                "HVAC contractor",
+                "HVAC repair",
+                "HVAC services",
+                "air conditioning repair",
+                "AC repair",
+                "furnace repair",
+                "heating and cooling",
+                "HVAC business",
+            ])
+        seen = set()
+        unique: List[str] = []
+        for item in variants:
+            key = item.lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(item)
+        return unique
 
     def _playwright(self):
         try:
@@ -130,8 +180,12 @@ class TikTokBrowserScraper:
         )
 
     @staticmethod
-    def _safe_limit(limit: int) -> int:
-        return max(20, min(50, int(limit or 30)))
+    def _safe_limit(limit: int, max_limit: int = 250) -> int:
+        return max(20, min(max_limit, int(limit or 30)))
+
+    @staticmethod
+    def _scroll_rounds(limit: int) -> int:
+        return max(4, min(40, (int(limit or 30) // 20) + 4))
 
     @staticmethod
     def _human_scroll(page, rounds: int = 4) -> None:
@@ -190,27 +244,28 @@ class TikTokBrowserScraper:
 
     def _leads_from_text(self, text: str, profile_url: str, query: str, title: str = "") -> List[Dict]:
         handle = self._handle_from_profile_url(profile_url)
-        leads: List[Dict] = []
-        emails = set(self.extractor.extract_emails(text))
-        phones = set(self.extractor.extract_phones(text))
-        companies = set(self.extractor.extract_company_names(text))
-
-        for email in emails:
-            if DataValidator.is_valid_email(email):
-                leads.append(self._make_lead(email=email, handle=handle, profile_url=profile_url,
-                                             query=query, title=title, context=text))
-        for phone in phones:
-            if DataValidator.is_valid_phone(phone):
-                leads.append(self._make_lead(phone=phone, handle=handle, profile_url=profile_url,
-                                             query=query, title=title, context=text))
-        for company in companies:
-            if DataValidator.is_valid_company_name(company):
-                leads.append(self._make_lead(company=company, handle=handle, profile_url=profile_url,
-                                             query=query, title=title, context=text))
-        if not leads:
-            leads.append(self._make_lead(handle=handle, profile_url=profile_url,
-                                         query=query, title=title, context=text))
-        return leads
+        emails = [
+            email for email in sorted(set(self.extractor.extract_emails(text)))
+            if DataValidator.is_valid_email(email)
+        ]
+        phones = [
+            phone for phone in sorted(set(self.extractor.extract_phones(text)))
+            if DataValidator.is_valid_phone(phone)
+        ]
+        companies = [
+            company for company in sorted(set(self.extractor.extract_company_names(text)))
+            if DataValidator.is_valid_company_name(company)
+        ]
+        return [self._make_lead(
+            email=emails[0] if emails else "",
+            phone=phones[0] if phones else "",
+            company=companies[0] if companies else "",
+            handle=handle,
+            profile_url=profile_url,
+            query=query,
+            title=title,
+            context=text,
+        )]
 
     def _lead_from_profile_url(self, profile_url: str, query: str) -> Dict:
         return self._make_lead(
@@ -259,7 +314,8 @@ class TikTokBrowserScraper:
         unique: List[Dict] = []
         for lead in leads:
             key = (
-                lead.get("email")
+                lead.get("profile_url")
+                or lead.get("email")
                 or lead.get("phone")
                 or lead.get("social_handle")
                 or lead.get("source_url")

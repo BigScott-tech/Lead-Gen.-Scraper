@@ -57,10 +57,13 @@ class DataValidator:
 
     @staticmethod
     def is_valid_company_name(company: str) -> bool:
-        if not company or len(company.strip()) < 3:
+        company = " ".join((company or "").split())
+        if len(company) < 3 or len(company) > 120:
             return False
         cl = company.lower()
         if any(w in cl for w in DataValidator._INVALID_COMPANY_WORDS):
+            return False
+        if cl.count("@") or cl.startswith(("http://", "https://")):
             return False
         return True
 
@@ -89,11 +92,16 @@ class DataValidator:
             has_phone   = DataValidator.is_valid_phone(lead.get("phone", ""))
             has_company = DataValidator.is_valid_company_name(lead.get("company_name", ""))
             has_handle  = bool(lead.get("social_handle", "").strip())
+            has_social_link = (
+                bool((lead.get("profile_url") or lead.get("post_link") or lead.get("bio_link") or "").strip())
+                and bool(lead.get("source_platform", "").strip())
+                and lead.get("lead_type") != "low_intent_social_result"
+            )
             if require_email:
                 if has_email:
                     valid.append(lead)
             else:
-                if has_email or has_phone or has_company or has_handle:
+                if has_email or has_phone or has_company or has_handle or has_social_link:
                     valid.append(lead)
         return valid
 

@@ -7,11 +7,13 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from utils.lead_extractor import LeadExtractor, LeadNormalizer
 from utils.command_parser import parse_search_command
+from utils.browser_launcher import BrowserLauncher
 from utils.lead_scoring import LeadScorer
 from utils.lead_store import LeadStore
 from utils.search_planner import SearchPlanner
 from utils.validators import DataValidator, DeduplicateManager
 from scrapers.browser_tiktok import TikTokBrowserScraper
+from scrapers.browser_x import XBrowserScraper
 from scrapers.social_scrapers import SearchBackedSocialScraper, _handle_from_url, _is_platform_url
 from scrapers.web_scraper import WebScraper
 from main import LeadScrappingEngine
@@ -122,6 +124,29 @@ class TestBrowserFallbackUrls:
         assert any("twitter.com/search" in url for url in urls)
         assert len(urls) == 2
 
+    def test_custom_search_urls_render_templates(self):
+        engine = LeadScrappingEngine("config.yaml")
+        urls = engine.build_custom_search_urls(
+            query="HVAC contractor",
+            searches=["google"],
+            regions=["Ontario"],
+        )
+
+        assert urls == ["https://www.google.com/search?q=HVAC+contractor+Ontario"]
+
+    def test_manual_search_urls_include_platform_and_selected_custom_links(self):
+        engine = LeadScrappingEngine("config.yaml")
+        urls = engine.build_manual_search_urls(
+            query="website developer needed",
+            platforms=["linkedin"],
+            custom_searches=["linkedin_posts"],
+            extra_urls=["https://example.com/search?q={query_plus}"],
+        )
+
+        assert any("linkedin.com/search/results/all" in url for url in urls)
+        assert any("linkedin.com/search/results/content" in url for url in urls)
+        assert "https://example.com/search?q=website+developer+needed" in urls
+
 
 class TestDataValidator:
     """Test data validation."""
@@ -227,6 +252,13 @@ class TestSearchPlanner:
         assert plan.since.isoformat() == "2026-05-10"
         assert "website developer needed" in plan.terms
 
+    def test_extract_since_operator_from_x_style_query(self):
+        planner = SearchPlanner()
+        plan = planner.plan(query="website developer needed since:2026-05-14")
+
+        assert plan.since.isoformat() == "2026-05-14"
+        assert "website developer needed" in plan.terms
+
     def test_twitter_queries_use_public_site_filters(self):
         planner = SearchPlanner({
             "platform_query_terms": {
@@ -279,7 +311,9 @@ class TestCommandParser:
     def test_parse_search_command_flags(self):
         parsed = parse_search_command(
             '-p x,ig -q "website developer needed" -n 20 -r Ontario '
-            '--format json --deep --browser --headful --profile buyer1'
+            '--format json --deep --browser --headful --profile buyer1 '
+            '--custom google,linkedin_posts --link "https://example.com/?q={query_plus}" '
+            '--browser-app brave --firefox-profile default'
         )
 
         assert parsed.platforms == ["twitter", "instagram"]
@@ -291,6 +325,30 @@ class TestCommandParser:
         assert parsed.browser is True
         assert parsed.headful is True
         assert parsed.profile == "buyer1"
+        assert parsed.custom_searches == ["google", "linkedin_posts"]
+        assert parsed.custom_links == ["https://example.com/?q={query_plus}"]
+        assert parsed.browser_app == "brave"
+        assert parsed.firefox_profile == "default"
+
+
+class TestBrowserLauncher:
+    def test_firefox_command_reuses_named_profile_tabs(self):
+        command = BrowserLauncher._firefox_command(
+            "/usr/bin/firefox",
+            ["https://example.com/a", "https://example.com/b"],
+            "default",
+            False,
+        )
+
+        assert command == [
+            "/usr/bin/firefox",
+            "-P",
+            "default",
+            "--new-tab",
+            "https://example.com/a",
+            "--new-tab",
+            "https://example.com/b",
+        ]
 
 
 class TestLeadScorer:
@@ -547,4 +605,81 @@ class TestTikTokBrowserScraper:
     def test_safe_browser_limit_caps_to_range(self):
         assert TikTokBrowserScraper._safe_limit(5) == 20
         assert TikTokBrowserScraper._safe_limit(30) == 30
-        assert TikTokBrowserScraper._safe_limit(100) == 50
+        assert TikTokBrowserScraper._safe_limit(100) == 100
+        assert TikTokBrowserScraper._safe_limit(300) == 250
+        assert TikTokBrowserScraper._safe_limit(100, max_limit=50) == 50
+
+    def test_scroll_rounds_scale_for_large_tiktok_batches(self):
+        assert TikTokBrowserScraper._scroll_rounds(30) == 5
+        assert TikTokBrowserScraper._scroll_rounds(200) == 14
+
+    def test_tiktok_hvac_query_variants_expand_searches(self):
+        variants = TikTokBrowserScraper._query_variants("HVAC")
+
+        assert "HVAC" in variants
+        assert "HVAC contractor" in variants
+        assert "air conditioning repair" in variants
+
+    def test_tiktok_profile_text_merges_contacts_into_one_lead(self):
+        scraper = TikTokBrowserScraper()
+        leads = scraper._leads_from_text(
+            "Viper Air LLC HVAC Call 480-589-1685 viperairconditioning@gmail.com",
+            "https://www.tiktok.com/@viperairllc",
+            "HVAC",
+            "TikTok - Make Your Day",
+        )
+
+        assert len(leads) == 1
+        assert leads[0]["email"] == "viperairconditioning@gmail.com"
+        assert leads[0]["phone"] == "+14805891685"
+
+
+class TestXBrowserScraper:
+    def test_build_search_query_adds_x_date_operators(self):
+        scraper = XBrowserScraper(config={"browser": {"x_max_batch_size": 250}})
+        query = scraper.build_search_query("website developer needed since 14-05-2026")
+
+        assert query.startswith('"website developer needed" since:2026-05-14')
+        assert "until:" in query
+        assert "-filter:retweets" in query
+
+    def test_build_search_query_preserves_x_since_operator(self):
+        scraper = XBrowserScraper()
+        query = scraper.build_search_query("website developer needed since:2026-05-14")
+
+        assert query.startswith('"website developer needed" since:2026-05-14')
+
+    def test_build_search_queries_adds_broad_x_variants(self):
+        scraper = XBrowserScraper()
+        queries = scraper.build_search_queries("website developer needed since:2026-05-14")
+
+        assert queries[0].startswith('"website developer needed" since:2026-05-14')
+        assert any('"web developer" (needed OR need OR hiring OR hire OR "looking for")' in query for query in queries)
+        assert all("since:2026-05-14" in query for query in queries)
+
+    def test_date_window_filters_old_posts(self):
+        assert XBrowserScraper._is_within_date_window(
+            "2026-05-14T12:00:00.000Z",
+            XBrowserScraper._parse_date_token("2026-05-14"),
+            XBrowserScraper._parse_date_token("2026-05-18"),
+        )
+        assert not XBrowserScraper._is_within_date_window(
+            "2026-05-13T23:59:00.000Z",
+            XBrowserScraper._parse_date_token("2026-05-14"),
+            XBrowserScraper._parse_date_token("2026-05-18"),
+        )
+
+    def test_lead_from_tweet_doc_includes_post_and_profile(self):
+        scraper = XBrowserScraper()
+        lead = scraper._lead_from_tweet_doc({
+            "text": "Need a website developer ASAP. Email buyer@example.com",
+            "post_link": "https://x.com/buyer/status/123/photo/1",
+            "profile_url": "https://x.com/buyer",
+            "handle": "buyer",
+            "datetime": "2026-05-14T12:00:00.000Z",
+        }, '"website developer needed" since:2026-05-14')
+
+        assert lead["social_handle"] == "@buyer"
+        assert lead["post_link"] == "https://x.com/buyer/status/123"
+        assert lead["profile_url"] == "https://x.com/buyer"
+        assert lead["email"] == "buyer@example.com"
